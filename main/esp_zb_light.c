@@ -19,24 +19,97 @@
 #include "math.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "esp_zb_light.h"
+#include "light_state_nvs.h"
+#include "esp_zigbee_attribute.h"
 
 #if !defined ZB_ED_ROLE
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile light (End Device) source code.
 #endif
 
 static const char *TAG = "ESP_ZB_COLOR_LIGHT";
+
+/* Tracks which colour-control conversion was last applied to the LEDs. The ZCL
+ * ColorMode attribute defaults to 0x01 (X/Y) and the stack does not update it on
+ * raw attribute writes, so it can't be trusted to pick the restore conversion.
+ * Updated on every hue/sat or X/Y write and persisted as the saved color_mode. */
+static uint8_t s_active_color_mode = LIGHT_NVS_DEFAULT_COLOR_MODE;
+
+/* Forward declarations for helpers defined later in this file */
+static void hsv_to_rgb(float h, float s, float v, uint8_t *r, uint8_t *g, uint8_t *b);
+void cie_xy_to_rgb(uint16_t x, uint16_t y, uint8_t *r, uint8_t *g, uint8_t *b);
 /********************* Define functions **************************/
 static esp_err_t deferred_driver_init(void)
 {
+    // Initialise the debounce timer used for NVS saves
+    if (light_state_nvs_init() != ESP_OK) {
+        ESP_LOGW(TAG, "NVS save timer init failed — state will not persist across reboots");
+    }
+
+    // Load persisted Zigbee attribute values (orange defaults on first boot)
+    light_state_t state;
+    light_state_nvs_load(&state);
+    s_active_color_mode = state.color_mode;
+
+    // Initialise the LED strip hardware (strip starts dark)
     light_driver_init(LIGHT_DEFAULT_OFF);
-    
-    // Test the LED strip with basic color test
-    ESP_LOGI(TAG, "Testing LED strip with basic color test...");
-    light_driver_set_power(true); // Turn on for test
-    light_driver_test_color_order();
-    light_driver_set_power(LIGHT_DEFAULT_OFF); // Turn off after test
-    
-    ESP_LOGI(TAG, "LED strip test complete");
+
+    // Restore colour — dispatch to existing converters based on ZCL colour_mode
+    uint8_t r, g, b;
+    if (state.color_mode == 0x00) {
+        // Hue / Saturation mode
+        float h = (state.current_hue / 255.0f) * 360.0f;
+        float s = state.current_saturation / 255.0f;
+        hsv_to_rgb(h, s, 1.0f, &r, &g, &b);
+    } else {
+        // XY mode (and any other mode — fall back to XY)
+        cie_xy_to_rgb(state.current_x, state.current_y, &r, &g, &b);
+    }
+    light_driver_set_color(r, g, b);
+    light_driver_set_brightness(state.current_level);
+    light_driver_set_power(state.on_off);
+
+    ESP_LOGI(TAG, "Driver restored — pwr=%s lvl=%d rgb=(%d,%d,%d) mode=%d",
+             state.on_off ? "On" : "Off", state.current_level, r, g, b, state.color_mode);
+
+    // Mirror the restored values back into the Zigbee cluster attributes so the
+    // coordinator sees the correct state immediately after reconnect (no conversion —
+    // we write the raw Zigbee values we loaded from NVS straight back).
+    bool     pwr  = state.on_off;
+    uint8_t  lvl  = state.current_level;
+    uint8_t  hue  = state.current_hue;
+    uint8_t  sat  = state.current_saturation;
+    uint16_t cx   = state.current_x;
+    uint16_t cy   = state.current_y;
+    uint8_t  mode = state.color_mode;
+
+    esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, &pwr, false);
+
+    esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID, &lvl, false);
+
+    esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_HUE_ID, &hue, false);
+
+    esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_SATURATION_ID, &sat, false);
+
+    esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_X_ID, &cx, false);
+
+    esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID, &cy, false);
+
+    esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_MODE_ID, &mode, false);
+
     return ESP_OK;
 }
 
@@ -222,6 +295,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_HUE_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8) {
                 current_hue = message->attribute.data.value ? *(uint8_t *)message->attribute.data.value : 0;
                 ESP_LOGI(TAG, "Current Hue set to %d", current_hue);
+                s_active_color_mode = 0x00;
                 // Convert hue to RGB using current saturation
                 float h = (current_hue / 255.0f) * 360.0f;
                 float s = current_saturation / 255.0f;
@@ -230,6 +304,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_SATURATION_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8) {
                 current_saturation = message->attribute.data.value ? *(uint8_t *)message->attribute.data.value : 255;
                 ESP_LOGI(TAG, "Current Saturation set to %d", current_saturation);
+                s_active_color_mode = 0x00;
                 // Convert hue to RGB using current hue
                 float h = (current_hue / 255.0f) * 360.0f;
                 float s = current_saturation / 255.0f;
@@ -243,6 +318,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16) {
                 uint16_t current_y = message->attribute.data.value ? *(uint16_t *)message->attribute.data.value : 0;
                 ESP_LOGI(TAG, "Color Y set to %d", current_y);
+                s_active_color_mode = 0x01;
                 // Get the stored X value and convert X/Y to RGB
                 cie_xy_to_rgb(stored_x, current_y, &red, &green, &blue);
                 ESP_LOGI(TAG, "CIE X/Y->RGB: X=%d, Y=%d -> R=%d, G=%d, B=%d", stored_x, current_y, red, green, blue);
@@ -250,6 +326,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_ENHANCED_CURRENT_HUE_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16) {
                 uint16_t hue = message->attribute.data.value ? *(uint16_t *)message->attribute.data.value : 0;
                 ESP_LOGI(TAG, "Enhanced Hue set to %d", hue);
+                s_active_color_mode = 0x00;
                 // Convert enhanced hue to RGB (0-65535 range)
                 float h = (hue / 65535.0f) * 360.0f;
                 float s = current_saturation / 255.0f;
@@ -269,6 +346,49 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         ret = zb_attribute_handler((esp_zb_zcl_set_attr_value_message_t *)message);
         // Log current state after any attribute change
         log_current_state();
+        // Persist the updated Zigbee attribute values (debounced NVS write).
+        // We read directly from the attribute table — the ZBOSS stack has already
+        // updated the in-memory values before invoking this callback.
+        {
+            light_state_t state = {0};
+            esp_zb_zcl_attr_t *attr;
+
+            attr = esp_zb_zcl_get_attribute(HA_ESP_LIGHT_ENDPOINT,
+                ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID);
+            if (attr) state.on_off = *(bool *)attr->data_p;
+
+            attr = esp_zb_zcl_get_attribute(HA_ESP_LIGHT_ENDPOINT,
+                ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID);
+            if (attr) state.current_level = *(uint8_t *)attr->data_p;
+
+            attr = esp_zb_zcl_get_attribute(HA_ESP_LIGHT_ENDPOINT,
+                ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_HUE_ID);
+            if (attr) state.current_hue = *(uint8_t *)attr->data_p;
+
+            attr = esp_zb_zcl_get_attribute(HA_ESP_LIGHT_ENDPOINT,
+                ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_SATURATION_ID);
+            if (attr) state.current_saturation = *(uint8_t *)attr->data_p;
+
+            attr = esp_zb_zcl_get_attribute(HA_ESP_LIGHT_ENDPOINT,
+                ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_X_ID);
+            if (attr) state.current_x = *(uint16_t *)attr->data_p;
+
+            attr = esp_zb_zcl_get_attribute(HA_ESP_LIGHT_ENDPOINT,
+                ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID);
+            if (attr) state.current_y = *(uint16_t *)attr->data_p;
+
+            // The ZCL ColorMode attribute is unreliable here (see s_active_color_mode),
+            // so persist the mode that actually drove the LED colour.
+            state.color_mode = s_active_color_mode;
+
+            light_state_nvs_save_debounced(&state);
+        }
         break;
     default:
         ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback", callback_id);

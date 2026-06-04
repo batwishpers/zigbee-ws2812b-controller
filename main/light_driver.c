@@ -54,7 +54,10 @@ void light_driver_set_power(bool power)
     uint8_t scaled_red = (s_red * s_power * s_brightness) / 255;
     uint8_t scaled_green = (s_green * s_power * s_brightness) / 255;
     uint8_t scaled_blue = (s_blue * s_power * s_brightness) / 255;
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, scaled_red, scaled_green, scaled_blue));
+    for (size_t i = 0; i < CONFIG_EXAMPLE_STRIP_LED_NUMBER; i++)
+    {
+        ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, scaled_red, scaled_green, scaled_blue));
+    }
     ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
 }
 
@@ -87,7 +90,10 @@ void light_driver_set_color_power(bool power, uint8_t red, uint8_t green, uint8_
     uint8_t scaled_red = (s_red * s_power * s_brightness) / 255;
     uint8_t scaled_green = (s_green * s_power * s_brightness) / 255;
     uint8_t scaled_blue = (s_blue * s_power * s_brightness) / 255;
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, scaled_red, scaled_green, scaled_blue));
+    for (size_t i = 0; i < CONFIG_EXAMPLE_STRIP_LED_NUMBER; i++)
+    {
+        ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, scaled_red, scaled_green, scaled_blue));
+    }
     ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
 }
 
