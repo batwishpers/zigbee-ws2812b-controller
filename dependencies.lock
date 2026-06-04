@@ -32,12 +32,12 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.1
+    version: 6.0.1
 direct_dependencies:
 - espressif/esp-zboss-lib
 - espressif/esp-zigbee-lib
 - espressif/led_strip
 - idf
 manifest_hash: 994ab6fce150a23b6adbfeab808b08091b897345dde1a08057f4533c9ee00965
-target: esp32c6
-version: 2.0.0
+target: esp32h2
+version: 3.0.0
