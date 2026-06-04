@@ -6,4 +6,4 @@ endif()
 
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "include" "interface"
-                       PRIV_REQUIRES "driver")
+                       PRIV_REQUIRES "driver" "esp_driver_rmt")
