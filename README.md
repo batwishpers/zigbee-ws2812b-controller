@@ -1,9 +1,9 @@
-| Supported Targets | ESP32-C5 | ESP32-C6 | ESP32-H2 |
+| Supported Targets | ESP32-C5 | ESP32-h2 | ESP32-H2 |
 | ----------------- | -------- | -------- | -------- |
 
 # Zigbee HA Color Light with LED Strip
 
-This project implements a full-featured Zigbee Home Automation color light using an ESP32-C6 and WS2812/SK68XX LED strip. It supports RGB color control, brightness adjustment, and provides comprehensive state reporting for integration with Zigbee2MQTT and other home automation systems.
+This project implements a full-featured Zigbee Home Automation color light using an ESP32-h2 and WS2812/SK68XX LED strip. It supports RGB color control, brightness adjustment, and provides comprehensive state reporting for integration with Zigbee2MQTT and other home automation systems.
 
 ## Features
 
@@ -31,14 +31,14 @@ The ESP Zigbee SDK provides more examples and tools for productization:
 
 ## Hardware Required
 
-* **ESP32-C6 Development Board**: Acting as Zigbee end-device
+* **ESP32-h2 Development Board**: Acting as Zigbee end-device
 * **WS2812/SK68XX LED Strip**: For RGB color output (connected to GPIO 8)
 * **USB Cable**: For power supply and programming
 * **Zigbee Coordinator**: Any Zigbee coordinator (Zigbee2MQTT, Home Assistant, etc.)
 
 ## Hardware Connections
 
-| ESP32-C6 Pin | LED Strip Connection |
+| ESP32-h2 Pin | LED Strip Connection |
 |--------------|---------------------|
 | GPIO 8       | Data Input (DIN)    |
 | 3.3V         | VCC (if 3.3V compatible) |
@@ -50,7 +50,7 @@ The ESP Zigbee SDK provides more examples and tools for productization:
 
 Before project configuration and build, make sure to set the correct chip target using:
 ```bash
-idf.py set-target esp32c6
+idf.py set-target esp32h2
 ```
 
 ## Erase the NVRAM

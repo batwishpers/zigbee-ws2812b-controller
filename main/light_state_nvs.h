@@ -32,7 +32,8 @@ extern "C" {
  *   current_x        : Color Control  — ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_X_ID
  *   current_y        : Color Control  — ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID
  *   color_mode       : Color Control  — ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_MODE_ID
- *                       0x00 = Hue/Saturation, 0x01 = XY
+ *                       0x00 = Hue/Saturation, 0x01 = XY, 0x02 = Enhanced Hue
+ *   enhanced_hue     : Color Control  — ESP_ZB_ZCL_ATTR_COLOR_CONTROL_ENHANCED_CURRENT_HUE_ID
  */
 typedef struct {
     bool     on_off;
@@ -42,6 +43,7 @@ typedef struct {
     uint16_t current_x;
     uint16_t current_y;
     uint8_t  color_mode;
+    uint16_t enhanced_hue;
 } light_state_t;
 
 /** Default state applied on first boot (no saved NVS data).
@@ -53,6 +55,7 @@ typedef struct {
 #define LIGHT_NVS_DEFAULT_SATURATION    255U
 #define LIGHT_NVS_DEFAULT_X             0x616BU  /*!< ZCL D65 white — unused when mode=Hue/Sat */
 #define LIGHT_NVS_DEFAULT_Y             0x607DU  /*!< ZCL D65 white — unused when mode=Hue/Sat */
+#define LIGHT_NVS_DEFAULT_ENHANCED_HUE  0x0000U  /*!< unused unless mode=Enhanced Hue */
 
 /**
  * @brief Initialise the NVS persistence module.

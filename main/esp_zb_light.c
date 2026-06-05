@@ -13,6 +13,7 @@
  */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -34,9 +35,82 @@ static const char *TAG = "ESP_ZB_COLOR_LIGHT";
  * Updated on every hue/sat or X/Y write and persisted as the saved color_mode. */
 static uint8_t s_active_color_mode = LIGHT_NVS_DEFAULT_COLOR_MODE;
 
+/* s_active_color_mode value for Enhanced Hue (and active color loop). The ZCL
+ * spec doesn't define this for the legacy ColorMode attribute, so it's a
+ * firmware-internal marker used to pick the restore conversion. */
+#define LIGHT_COLOR_MODE_ENHANCED_HUE  0x02U
+
+/* How often the color loop re-renders the LED from EnhancedCurrentHue. */
+#define COLOR_LOOP_RENDER_INTERVAL_MS  100
+
 /* Forward declarations for helpers defined later in this file */
 static void hsv_to_rgb(float h, float s, float v, uint8_t *r, uint8_t *g, uint8_t *b);
 void cie_xy_to_rgb(uint16_t x, uint16_t y, uint8_t *r, uint8_t *g, uint8_t *b);
+
+/* Periodic timer that mirrors the stack-managed EnhancedCurrentHue attribute
+ * onto the LED while a color loop is active. */
+static TimerHandle_t s_color_loop_timer = NULL;
+
+static uint8_t color_attr_u8(uint16_t attr_id, uint8_t fallback)
+{
+    esp_zb_zcl_attr_t *a = esp_zb_zcl_get_attribute(HA_ESP_LIGHT_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, attr_id);
+    return (a && a->data_p) ? *(uint8_t *)a->data_p : fallback;
+}
+
+static uint16_t color_attr_u16(uint16_t attr_id, uint16_t fallback)
+{
+    esp_zb_zcl_attr_t *a = esp_zb_zcl_get_attribute(HA_ESP_LIGHT_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, attr_id);
+    return (a && a->data_p) ? *(uint16_t *)a->data_p : fallback;
+}
+
+static void color_loop_render_cb(TimerHandle_t timer)
+{
+    /* The stack processes ColorLoopSet internally and sets ColorLoopActive, but
+     * it does NOT advance EnhancedCurrentHue (it just re-writes the start hue,
+     * which stays 0 = red). So we drive the animation ourselves: while the loop
+     * is active we step our own hue accumulator and render it locally. When the
+     * loop is off the event-driven attribute handler owns the LED again. */
+    static bool     was_active = false;
+    static uint16_t hue        = 0;
+
+    if (color_attr_u8(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_ACTIVE_ID, 0) == 0) {
+        was_active = false;
+        return;
+    }
+
+    uint8_t  dir   = color_attr_u8(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_DIRECTION_ID, 1);
+    uint16_t ltime = color_attr_u16(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_TIME_ID, 0x0019);
+    if (ltime == 0) {
+        ltime = 0x0019;
+    }
+
+    /* A color loop is a vivid rainbow sweep, so render at full saturation. We do
+     * NOT read CurrentSaturation here: it can legitimately be 0 (white), which
+     * would wash the loop out entirely. */
+    const uint8_t sat = 0xFE;
+
+    if (!was_active) {
+        /* Seed from the configured start hue on each fresh activation. */
+        hue = color_attr_u16(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_START_ENHANCED_HUE_ID, 0);
+        was_active = true;
+        ESP_LOGI(TAG, "ColorLoop start — dir=%u time=%us start_hue=%u", dir, ltime, hue);
+    }
+
+    /* Advance one render tick of a full 0..65535 sweep performed over `ltime`
+     * seconds. Direction 0x00 = decrement, 0x01 = increment (per ZCL spec). */
+    uint32_t step = (uint32_t)((65536.0f * COLOR_LOOP_RENDER_INTERVAL_MS) / (ltime * 1000.0f));
+    if (step == 0) {
+        step = 1;
+    }
+    hue = (dir == 0x00) ? (uint16_t)(hue - step) : (uint16_t)(hue + step);
+
+    uint8_t r, g, b;
+    hsv_to_rgb((hue / 65535.0f) * 360.0f, sat / 255.0f, 1.0f, &r, &g, &b);
+    light_driver_set_color(r, g, b);
+    s_active_color_mode = LIGHT_COLOR_MODE_ENHANCED_HUE;
+}
 /********************* Define functions **************************/
 static esp_err_t deferred_driver_init(void)
 {
@@ -60,6 +134,11 @@ static esp_err_t deferred_driver_init(void)
         float h = (state.current_hue / 255.0f) * 360.0f;
         float s = state.current_saturation / 255.0f;
         hsv_to_rgb(h, s, 1.0f, &r, &g, &b);
+    } else if (state.color_mode == LIGHT_COLOR_MODE_ENHANCED_HUE) {
+        // Enhanced Hue mode (last applied via enhanced hue or color loop)
+        float h = (state.enhanced_hue / 65535.0f) * 360.0f;
+        float s = state.current_saturation / 255.0f;
+        hsv_to_rgb(h, s, 1.0f, &r, &g, &b);
     } else {
         // XY mode (and any other mode — fall back to XY)
         cie_xy_to_rgb(state.current_x, state.current_y, &r, &g, &b);
@@ -81,6 +160,7 @@ static esp_err_t deferred_driver_init(void)
     uint16_t cx   = state.current_x;
     uint16_t cy   = state.current_y;
     uint8_t  mode = state.color_mode;
+    uint16_t ehue = state.enhanced_hue;
 
     esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
         ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
@@ -109,6 +189,20 @@ static esp_err_t deferred_driver_init(void)
     esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
         ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
         ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_MODE_ID, &mode, false);
+
+    esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_COLOR_CONTROL_ENHANCED_CURRENT_HUE_ID, &ehue, false);
+
+    // Start the color-loop render timer (auto-reload). It only drives the LED
+    // while the ColorLoopActive attribute is set, so it's harmless when idle.
+    s_color_loop_timer = xTimerCreate("color_loop", pdMS_TO_TICKS(COLOR_LOOP_RENDER_INTERVAL_MS),
+                                      pdTRUE, NULL, color_loop_render_cb);
+    if (s_color_loop_timer == NULL || xTimerStart(s_color_loop_timer, 0) != pdPASS) {
+        ESP_LOGE(TAG, "Color loop render timer failed to start");
+    } else {
+        ESP_LOGI(TAG, "Color loop render timer started (%d ms)", COLOR_LOOP_RENDER_INTERVAL_MS);
+    }
 
     return ESP_OK;
 }
@@ -273,6 +367,17 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
     ESP_RETURN_ON_FALSE(message, ESP_FAIL, TAG, "Empty message");
     ESP_RETURN_ON_FALSE(message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS, ESP_ERR_INVALID_ARG, TAG, "Received message: error status(%d)",
                         message->info.status);
+
+    /* While a color loop runs, the stack spams EnhancedCurrentHue writes (it does
+     * not advance the hue itself). Drop them silently — color_loop_render_cb owns
+     * the LED and animates the hue locally; honoring these would fight it and flood the log. */
+    if (message->info.dst_endpoint == HA_ESP_LIGHT_ENDPOINT &&
+        message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL &&
+        message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_ENHANCED_CURRENT_HUE_ID &&
+        color_attr_u8(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_ACTIVE_ID, 0) != 0) {
+        return ESP_OK;
+    }
+
     ESP_LOGI(TAG, "Received message: endpoint(%d), cluster(0x%x), attribute(0x%x), data size(%d)", message->info.dst_endpoint, message->info.cluster,
              message->attribute.id, message->attribute.data.size);
     if (message->attribute.data.value) {
@@ -326,7 +431,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_ENHANCED_CURRENT_HUE_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16) {
                 uint16_t hue = message->attribute.data.value ? *(uint16_t *)message->attribute.data.value : 0;
                 ESP_LOGI(TAG, "Enhanced Hue set to %d", hue);
-                s_active_color_mode = 0x00;
+                s_active_color_mode = LIGHT_COLOR_MODE_ENHANCED_HUE;
                 // Convert enhanced hue to RGB (0-65535 range)
                 float h = (hue / 65535.0f) * 360.0f;
                 float s = current_saturation / 255.0f;
@@ -345,7 +450,7 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
     case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
         ret = zb_attribute_handler((esp_zb_zcl_set_attr_value_message_t *)message);
         // Log current state after any attribute change
-        log_current_state();
+        //log_current_state();
         // Persist the updated Zigbee attribute values (debounced NVS write).
         // We read directly from the attribute table — the ZBOSS stack has already
         // updated the in-memory values before invoking this callback.
@@ -383,6 +488,11 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
                 ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID);
             if (attr) state.current_y = *(uint16_t *)attr->data_p;
 
+            attr = esp_zb_zcl_get_attribute(HA_ESP_LIGHT_ENDPOINT,
+                ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                ESP_ZB_ZCL_ATTR_COLOR_CONTROL_ENHANCED_CURRENT_HUE_ID);
+            if (attr) state.enhanced_hue = *(uint16_t *)attr->data_p;
+
             // The ZCL ColorMode attribute is unreliable here (see s_active_color_mode),
             // so persist the mode that actually drove the LED colour.
             state.color_mode = s_active_color_mode;
@@ -403,7 +513,70 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZED_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
     esp_zb_color_dimmable_light_cfg_t light_cfg = ESP_ZB_DEFAULT_COLOR_DIMMABLE_LIGHT_CONFIG();
-    esp_zb_ep_list_t *esp_zb_color_light_ep = esp_zb_color_dimmable_light_ep_create(HA_ESP_LIGHT_ENDPOINT, &light_cfg);
+    // Advertise Hue/Sat (0x01) | Enhanced Hue (0x02) | Color Loop (0x04) | X/Y (0x08).
+    // Enhanced Hue and Color Loop bits are required for coordinators to expose the loop.
+    light_cfg.color_cfg.color_capabilities = 0x000F;
+
+    esp_zb_cluster_list_t *cluster_list = esp_zb_color_dimmable_light_clusters_create(&light_cfg);
+
+    // The default color cluster omits the enhanced-hue and color-loop attributes;
+    // add them so the coordinator can drive (and the stack can run) a color loop.
+    esp_zb_attribute_list_t *color_cluster = esp_zb_cluster_list_get_cluster(
+        cluster_list, ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    uint8_t  cur_hue     = ESP_ZB_ZCL_COLOR_CONTROL_CURRENT_HUE_DEFAULT_VALUE;
+    /* Spec default is 0x00 (fully desaturated = white). Seed at max so a color loop
+     * shows saturated colors before the coordinator sets a saturation of its own. */
+    uint8_t  cur_sat     = 0xFE;
+    uint16_t remain_time = ESP_ZB_ZCL_COLOR_CONTROL_REMAINING_TIME_DEFAULT_VALUE;
+    uint16_t enh_hue     = ESP_ZB_ZCL_COLOR_CONTROL_ENHANCED_CURRENT_HUE_DEFAULT_VALUE;
+    uint8_t  loop_active = ESP_ZB_ZCL_COLOR_CONTROL_COLOR_LOOP_ACTIVE_DEFAULT_VALUE;
+    uint8_t  loop_dir    = ESP_ZB_ZCL_COLOR_CONTROL_COLOR_LOOP_DIRECTION_DEFAULT_VALUE;
+    uint16_t loop_time   = ESP_ZB_ZCL_COLOR_CONTROL_COLOR_LOOP_TIME_DEF_VALUE;
+    uint16_t loop_start  = ESP_ZB_ZCL_COLOR_CONTROL_COLOR_LOOP_START_DEF_VALUE;
+    uint16_t loop_stored = ESP_ZB_ZCL_COLOR_CONTROL_COLOR_LOOP_STORED_ENHANCED_HUE_DEFAULT_VALUE;
+
+    /* The default config only creates the X/Y attribute set (plus EnhancedColorMode
+     * and ColorCapabilities). We advertise color_capabilities=0x000F, so we must also
+     * create the Hue/Sat set (CurrentHue/CurrentSaturation/RemainingTime) and the
+     * enhanced-hue + color-loop attributes — otherwise the stack dereferences a NULL
+     * descriptor and aborts when a coordinator drives those features (e.g. picking a
+     * color while a loop runs triggers an enhanced-move-to-hue/sat transition).
+     * The typed esp_zb_color_control_cluster_add_attr() wrapper rejects several of
+     * these IDs, so use the generic helper, which creates any attribute ID
+     * unconditionally, and check every return. */
+    struct {
+        uint16_t id;
+        uint8_t  type;
+        uint8_t  access;
+        void    *value;
+    } loop_attrs[] = {
+        { ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_HUE_ID,                  ESP_ZB_ZCL_ATTR_TYPE_U8,  ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &cur_hue     },
+        { ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_SATURATION_ID,           ESP_ZB_ZCL_ATTR_TYPE_U8,  ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &cur_sat     },
+        { ESP_ZB_ZCL_ATTR_COLOR_CONTROL_REMAINING_TIME_ID,               ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,                                   &remain_time },
+        { ESP_ZB_ZCL_ATTR_COLOR_CONTROL_ENHANCED_CURRENT_HUE_ID,         ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &enh_hue     },
+        { ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_ACTIVE_ID,            ESP_ZB_ZCL_ATTR_TYPE_U8,  ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,                                   &loop_active },
+        { ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_DIRECTION_ID,         ESP_ZB_ZCL_ATTR_TYPE_U8,  ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,                                   &loop_dir    },
+        { ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_TIME_ID,              ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,                                   &loop_time   },
+        { ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_START_ENHANCED_HUE_ID,  ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,                                 &loop_start  },
+        { ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_STORED_ENHANCED_HUE_ID, ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,                                 &loop_stored },
+    };
+    for (size_t i = 0; i < sizeof(loop_attrs) / sizeof(loop_attrs[0]); i++) {
+        esp_err_t add_err = esp_zb_cluster_add_attr(
+            color_cluster, ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL,
+            loop_attrs[i].id, loop_attrs[i].type, loop_attrs[i].access, loop_attrs[i].value);
+        if (add_err != ESP_OK) {
+            ESP_LOGW(TAG, "add color attr 0x%04x failed: %s", loop_attrs[i].id, esp_err_to_name(add_err));
+        }
+    }
+
+    esp_zb_ep_list_t *esp_zb_color_light_ep = esp_zb_ep_list_create();
+    esp_zb_endpoint_config_t ep_config = {
+        .endpoint = HA_ESP_LIGHT_ENDPOINT,
+        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+        .app_device_id = ESP_ZB_HA_COLOR_DIMMABLE_LIGHT_DEVICE_ID,
+        .app_device_version = 0,
+    };
+    esp_zb_ep_list_add_ep(esp_zb_color_light_ep, cluster_list, ep_config);
     zcl_basic_manufacturer_info_t info = {
         .manufacturer_name = ESP_MANUFACTURER_NAME,
         .model_identifier = ESP_MODEL_IDENTIFIER,

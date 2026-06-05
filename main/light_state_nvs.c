@@ -22,6 +22,7 @@ static const char *TAG = "LIGHT_NVS";
 #define NVS_KEY_CX      "cx"
 #define NVS_KEY_CY      "cy"
 #define NVS_KEY_CMODE   "cmode"
+#define NVS_KEY_EHUE    "ehue"
 
 static TimerHandle_t   s_save_timer   = NULL;
 static light_state_t   s_pending_state;
@@ -46,19 +47,21 @@ static void nvs_save_timer_cb(TimerHandle_t timer)
     nvs_set_u16(handle, NVS_KEY_CX,    s_pending_state.current_x);
     nvs_set_u16(handle, NVS_KEY_CY,    s_pending_state.current_y);
     nvs_set_u8(handle,  NVS_KEY_CMODE, s_pending_state.color_mode);
+    nvs_set_u16(handle, NVS_KEY_EHUE,  s_pending_state.enhanced_hue);
 
     err = nvs_commit(handle);
     nvs_close(handle);
 
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "State saved — pwr=%d lvl=%d hue=%d sat=%d x=%d y=%d mode=%d",
+        ESP_LOGI(TAG, "State saved — pwr=%d lvl=%d hue=%d sat=%d x=%d y=%d mode=%d ehue=%d",
                  s_pending_state.on_off,
                  s_pending_state.current_level,
                  s_pending_state.current_hue,
                  s_pending_state.current_saturation,
                  s_pending_state.current_x,
                  s_pending_state.current_y,
-                 s_pending_state.color_mode);
+                 s_pending_state.color_mode,
+                 s_pending_state.enhanced_hue);
     } else {
         ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
     }
@@ -96,6 +99,7 @@ esp_err_t light_state_nvs_load(light_state_t *state)
     state->current_saturation = LIGHT_NVS_DEFAULT_SATURATION;
     state->current_x          = LIGHT_NVS_DEFAULT_X;
     state->current_y          = LIGHT_NVS_DEFAULT_Y;
+    state->enhanced_hue       = LIGHT_NVS_DEFAULT_ENHANCED_HUE;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
@@ -119,17 +123,19 @@ esp_err_t light_state_nvs_load(light_state_t *state)
     if (nvs_get_u16(handle, NVS_KEY_CX,    &u16) == ESP_OK) state->current_x          = u16;
     if (nvs_get_u16(handle, NVS_KEY_CY,    &u16) == ESP_OK) state->current_y          = u16;
     if (nvs_get_u8(handle,  NVS_KEY_CMODE, &u8)  == ESP_OK) state->color_mode         = u8;
+    if (nvs_get_u16(handle, NVS_KEY_EHUE,  &u16) == ESP_OK) state->enhanced_hue       = u16;
 
     nvs_close(handle);
 
-    ESP_LOGI(TAG, "State loaded — pwr=%d lvl=%d hue=%d sat=%d x=%d y=%d mode=%d",
+    ESP_LOGI(TAG, "State loaded — pwr=%d lvl=%d hue=%d sat=%d x=%d y=%d mode=%d ehue=%d",
              state->on_off,
              state->current_level,
              state->current_hue,
              state->current_saturation,
              state->current_x,
              state->current_y,
-             state->color_mode);
+             state->color_mode,
+             state->enhanced_hue);
 
     return ESP_OK;
 }

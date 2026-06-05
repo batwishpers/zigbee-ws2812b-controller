@@ -40,25 +40,41 @@
 #include "light_driver.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 static led_strip_handle_t s_led_strip;
 static uint8_t s_red = 255, s_green = 255, s_blue = 255;
 static bool s_power = false;
 static uint8_t s_brightness = 255; // 0-255, where 255 is full brightness
 
-void light_driver_set_power(bool power)
+/* Serializes RMT/led_strip access: the color-loop render timer (timer daemon
+ * task) and the Zigbee task can both drive the strip concurrently. */
+static SemaphoreHandle_t s_strip_mutex = NULL;
+
+/* Push the current colour (brightness/power scaled) to the strip, guarded so
+ * concurrent callers can't interleave set_pixel/refresh on the same channel. */
+static void apply_to_strip(void)
 {
-    s_power = power;
-    // LED strip uses RGB color order, so we need to send Red, Green, Blue
-    // Apply brightness scaling: (color * power * brightness) / 255
     uint8_t scaled_red = (s_red * s_power * s_brightness) / 255;
     uint8_t scaled_green = (s_green * s_power * s_brightness) / 255;
     uint8_t scaled_blue = (s_blue * s_power * s_brightness) / 255;
+    if (s_strip_mutex) {
+        xSemaphoreTake(s_strip_mutex, portMAX_DELAY);
+    }
     for (size_t i = 0; i < CONFIG_EXAMPLE_STRIP_LED_NUMBER; i++)
     {
         ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, scaled_red, scaled_green, scaled_blue));
     }
     ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
+    if (s_strip_mutex) {
+        xSemaphoreGive(s_strip_mutex);
+    }
+}
+
+void light_driver_set_power(bool power)
+{
+    s_power = power;
+    apply_to_strip();
 }
 
 void light_driver_set_color(uint8_t red, uint8_t green, uint8_t blue)
@@ -66,17 +82,8 @@ void light_driver_set_color(uint8_t red, uint8_t green, uint8_t blue)
     s_red = red;
     s_green = green;
     s_blue = blue;
-    ESP_LOGI("LIGHT_DRIVER", "Setting color: R=%d, G=%d, B=%d, Power=%d, Brightness=%d", red, green, blue, s_power, s_brightness);
-    // LED strip uses RGB color order, so we need to send Red, Green, Blue
-    // Apply brightness scaling: (color * power * brightness) / 255
-    uint8_t scaled_red = (s_red * s_power * s_brightness) / 255;
-    uint8_t scaled_green = (s_green * s_power * s_brightness) / 255;
-    uint8_t scaled_blue = (s_blue * s_power * s_brightness) / 255;
-    for (size_t i = 0; i < CONFIG_EXAMPLE_STRIP_LED_NUMBER; i++)
-    {
-        ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, scaled_red, scaled_green, scaled_blue));
-    }
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
+    //ESP_LOGI("LIGHT_DRIVER", "Setting color: R=%d, G=%d, B=%d, Power=%d, Brightness=%d", red, green, blue, s_power, s_brightness);
+    apply_to_strip();
 }
 
 void light_driver_set_color_power(bool power, uint8_t red, uint8_t green, uint8_t blue)
@@ -85,16 +92,7 @@ void light_driver_set_color_power(bool power, uint8_t red, uint8_t green, uint8_
     s_red = red;
     s_green = green;
     s_blue = blue;
-    // LED strip uses RGB color order, so we need to send Red, Green, Blue
-    // Apply brightness scaling: (color * power * brightness) / 255
-    uint8_t scaled_red = (s_red * s_power * s_brightness) / 255;
-    uint8_t scaled_green = (s_green * s_power * s_brightness) / 255;
-    uint8_t scaled_blue = (s_blue * s_power * s_brightness) / 255;
-    for (size_t i = 0; i < CONFIG_EXAMPLE_STRIP_LED_NUMBER; i++)
-    {
-        ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, scaled_red, scaled_green, scaled_blue));
-    }
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
+    apply_to_strip();
 }
 
 void light_driver_get_color(uint8_t *red, uint8_t *green, uint8_t *blue)
@@ -108,15 +106,7 @@ void light_driver_set_brightness(uint8_t brightness)
 {
     s_brightness = brightness;
     ESP_LOGI("LIGHT_DRIVER", "Setting brightness: %d", brightness);
-    // Update the LED with current color and new brightness
-    uint8_t scaled_red = (s_red * s_power * s_brightness) / 255;
-    uint8_t scaled_green = (s_green * s_power * s_brightness) / 255;
-    uint8_t scaled_blue = (s_blue * s_power * s_brightness) / 255;
-    for (size_t i = 0; i < CONFIG_EXAMPLE_STRIP_LED_NUMBER; i++)
-    {
-        ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, scaled_red, scaled_green, scaled_blue));
-    }
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
+    apply_to_strip();
 }
 
 uint8_t light_driver_get_brightness(void)
@@ -321,5 +311,8 @@ void light_driver_init(bool power)
         .resolution_hz = 10 * 1000 * 1000, // 10MHz
     };
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&led_strip_conf, &rmt_conf, &s_led_strip));
+    if (s_strip_mutex == NULL) {
+        s_strip_mutex = xSemaphoreCreateMutex();
+    }
     light_driver_set_power(power);
 }
