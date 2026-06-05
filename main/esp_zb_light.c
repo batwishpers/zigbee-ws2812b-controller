@@ -22,6 +22,7 @@
 #include "esp_zb_light.h"
 #include "light_state_nvs.h"
 #include "esp_zigbee_attribute.h"
+#include "esp_random.h"
 
 #if !defined ZB_ED_ROLE
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile light (End Device) source code.
@@ -42,6 +43,19 @@ static uint8_t s_active_color_mode = LIGHT_NVS_DEFAULT_COLOR_MODE;
 
 /* How often the color loop re-renders the LED from EnhancedCurrentHue. */
 #define COLOR_LOOP_RENDER_INTERVAL_MS  100
+
+/* Manufacturer-specific cluster + attribute that select an animated light effect.
+ * ZHA drives this via a custom quirk (see zha_quirk/zigbee_status_box.py). The
+ * firmware runs the chosen effect inside the existing render timer. */
+#define LIGHT_EFFECT_CLUSTER_ID  0xFC00
+#define LIGHT_EFFECT_ATTR_ID     0x0000
+enum {
+    LIGHT_EFFECT_NONE    = 0,
+    LIGHT_EFFECT_RAINBOW = 1,
+    LIGHT_EFFECT_FIRE    = 2,
+    LIGHT_EFFECT_CANDLE  = 3,
+};
+static uint8_t s_effect_mode = LIGHT_EFFECT_NONE;
 
 /* Forward declarations for helpers defined later in this file */
 static void hsv_to_rgb(float h, float s, float v, uint8_t *r, uint8_t *g, uint8_t *b);
@@ -65,20 +79,34 @@ static uint16_t color_attr_u16(uint16_t attr_id, uint16_t fallback)
     return (a && a->data_p) ? *(uint16_t *)a->data_p : fallback;
 }
 
-static void color_loop_render_cb(TimerHandle_t timer)
+/* Restore the LED to the last user-selected static color. Mirrors the restore
+ * logic in deferred_driver_init, but reads live ZCL attribute values so it can be
+ * called whenever an animated effect ends. Does not touch s_active_color_mode. */
+static void apply_static_color(void)
 {
-    /* The stack processes ColorLoopSet internally and sets ColorLoopActive, but
-     * it does NOT advance EnhancedCurrentHue (it just re-writes the start hue,
-     * which stays 0 = red). So we drive the animation ourselves: while the loop
-     * is active we step our own hue accumulator and render it locally. When the
-     * loop is off the event-driven attribute handler owns the LED again. */
-    static bool     was_active = false;
-    static uint16_t hue        = 0;
-
-    if (color_attr_u8(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_ACTIVE_ID, 0) == 0) {
-        was_active = false;
-        return;
+    uint8_t r, g, b;
+    if (s_active_color_mode == 0x00) {
+        float h = (color_attr_u8(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_HUE_ID, 0) / 255.0f) * 360.0f;
+        float s = color_attr_u8(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_SATURATION_ID, 255) / 255.0f;
+        hsv_to_rgb(h, s, 1.0f, &r, &g, &b);
+    } else if (s_active_color_mode == LIGHT_COLOR_MODE_ENHANCED_HUE) {
+        float h = (color_attr_u16(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_ENHANCED_CURRENT_HUE_ID, 0) / 65535.0f) * 360.0f;
+        float s = color_attr_u8(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_SATURATION_ID, 255) / 255.0f;
+        hsv_to_rgb(h, s, 1.0f, &r, &g, &b);
+    } else {
+        cie_xy_to_rgb(color_attr_u16(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_X_ID, 0),
+                      color_attr_u16(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID, 0), &r, &g, &b);
     }
+    light_driver_set_color(r, g, b);
+}
+
+/* Rainbow sweep — drives EnhancedCurrentHue ourselves. The stack sets
+ * ColorLoopActive on a ZCL ColorLoopSet but does NOT advance the hue (it just
+ * re-writes the start hue, which stays 0 = red), so we step a local accumulator
+ * and render it. `fresh` re-seeds from the configured start hue on (re)activation. */
+static void render_rainbow(bool fresh)
+{
+    static uint16_t hue = 0;
 
     uint8_t  dir   = color_attr_u8(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_DIRECTION_ID, 1);
     uint16_t ltime = color_attr_u16(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_TIME_ID, 0x0019);
@@ -91,11 +119,9 @@ static void color_loop_render_cb(TimerHandle_t timer)
      * would wash the loop out entirely. */
     const uint8_t sat = 0xFE;
 
-    if (!was_active) {
-        /* Seed from the configured start hue on each fresh activation. */
+    if (fresh) {
         hue = color_attr_u16(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_START_ENHANCED_HUE_ID, 0);
-        was_active = true;
-        ESP_LOGI(TAG, "ColorLoop start — dir=%u time=%us start_hue=%u", dir, ltime, hue);
+        ESP_LOGI(TAG, "Rainbow start — dir=%u time=%us start_hue=%u", dir, ltime, hue);
     }
 
     /* Advance one render tick of a full 0..65535 sweep performed over `ltime`
@@ -110,6 +136,60 @@ static void color_loop_render_cb(TimerHandle_t timer)
     hsv_to_rgb((hue / 65535.0f) * 360.0f, sat / 255.0f, 1.0f, &r, &g, &b);
     light_driver_set_color(r, g, b);
     s_active_color_mode = LIGHT_COLOR_MODE_ENHANCED_HUE;
+}
+
+/* Organic warm-flicker render shared by fire and candle. Each tick eases the
+ * brightness and hue toward fresh random targets so the result shimmers instead
+ * of strobing. Deliberately does NOT touch s_active_color_mode, so the static
+ * color saved for restore is preserved. */
+static void render_flicker(float hue_lo, float hue_hi, float val_lo, float val_hi, float smoothing)
+{
+    static float level = 0.7f;
+    static float hue   = 25.0f;
+
+    float val_target = val_lo + (val_hi - val_lo) * (esp_random() / (float)UINT32_MAX);
+    float hue_target = hue_lo + (hue_hi - hue_lo) * (esp_random() / (float)UINT32_MAX);
+
+    level += (val_target - level) * smoothing;
+    hue   += (hue_target - hue)   * smoothing;
+
+    uint8_t r, g, b;
+    hsv_to_rgb(hue, 1.0f, level, &r, &g, &b);
+    light_driver_set_color(r, g, b);
+}
+
+static void color_loop_render_cb(TimerHandle_t timer)
+{
+    static uint8_t last_effect = LIGHT_EFFECT_NONE;
+
+    /* A ZCL-driven color loop (ColorLoopActive) is treated as the rainbow effect. */
+    uint8_t effect = s_effect_mode;
+    if (effect == LIGHT_EFFECT_NONE &&
+        color_attr_u8(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_ACTIVE_ID, 0) != 0) {
+        effect = LIGHT_EFFECT_RAINBOW;
+    }
+
+    if (effect == LIGHT_EFFECT_NONE) {
+        last_effect = LIGHT_EFFECT_NONE;
+        return;
+    }
+
+    bool fresh = (effect != last_effect);
+    last_effect = effect;
+
+    switch (effect) {
+    case LIGHT_EFFECT_RAINBOW:
+        render_rainbow(fresh);
+        break;
+    case LIGHT_EFFECT_FIRE:
+        render_flicker(5.0f, 35.0f, 0.40f, 1.0f, 0.30f);
+        break;
+    case LIGHT_EFFECT_CANDLE:
+        render_flicker(28.0f, 42.0f, 0.50f, 0.95f, 0.15f);
+        break;
+    default:
+        break;
+    }
 }
 /********************* Define functions **************************/
 static esp_err_t deferred_driver_init(void)
@@ -339,6 +419,21 @@ void cie_xy_to_rgb(uint16_t x, uint16_t y, uint8_t *r, uint8_t *g, uint8_t *b) {
     *b = (uint8_t)(bf * 255);
 }
 
+/* Turn off any running animated effect and reflect that back to the coordinator
+ * so ZHA's "Effect mode" select returns to NoEffect. Called when a manual color
+ * is applied — the chosen color should win over an effect. */
+static void deactivate_effect(void)
+{
+    if (s_effect_mode == LIGHT_EFFECT_NONE) {
+        return;
+    }
+    s_effect_mode = LIGHT_EFFECT_NONE;
+    uint8_t none = LIGHT_EFFECT_NONE;
+    esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+        LIGHT_EFFECT_CLUSTER_ID, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        LIGHT_EFFECT_ATTR_ID, &none, false);
+}
+
 // Helper function to log current state for debugging
 static void log_current_state(void)
 {
@@ -400,6 +495,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_HUE_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8) {
                 current_hue = message->attribute.data.value ? *(uint8_t *)message->attribute.data.value : 0;
                 ESP_LOGI(TAG, "Current Hue set to %d", current_hue);
+                deactivate_effect();
                 s_active_color_mode = 0x00;
                 // Convert hue to RGB using current saturation
                 float h = (current_hue / 255.0f) * 360.0f;
@@ -409,6 +505,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_SATURATION_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8) {
                 current_saturation = message->attribute.data.value ? *(uint8_t *)message->attribute.data.value : 255;
                 ESP_LOGI(TAG, "Current Saturation set to %d", current_saturation);
+                deactivate_effect();
                 s_active_color_mode = 0x00;
                 // Convert hue to RGB using current hue
                 float h = (current_hue / 255.0f) * 360.0f;
@@ -423,6 +520,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16) {
                 uint16_t current_y = message->attribute.data.value ? *(uint16_t *)message->attribute.data.value : 0;
                 ESP_LOGI(TAG, "Color Y set to %d", current_y);
+                deactivate_effect();
                 s_active_color_mode = 0x01;
                 // Get the stored X value and convert X/Y to RGB
                 cie_xy_to_rgb(stored_x, current_y, &red, &green, &blue);
@@ -431,12 +529,21 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_ENHANCED_CURRENT_HUE_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16) {
                 uint16_t hue = message->attribute.data.value ? *(uint16_t *)message->attribute.data.value : 0;
                 ESP_LOGI(TAG, "Enhanced Hue set to %d", hue);
+                deactivate_effect();
                 s_active_color_mode = LIGHT_COLOR_MODE_ENHANCED_HUE;
                 // Convert enhanced hue to RGB (0-65535 range)
                 float h = (hue / 65535.0f) * 360.0f;
                 float s = current_saturation / 255.0f;
                 hsv_to_rgb(h, s, 1.0f, &red, &green, &blue);
                 light_driver_set_color(red, green, blue);
+            }
+        } else if (message->info.cluster == LIGHT_EFFECT_CLUSTER_ID) {
+            if (message->attribute.id == LIGHT_EFFECT_ATTR_ID && message->attribute.data.value) {
+                s_effect_mode = *(uint8_t *)message->attribute.data.value;
+                ESP_LOGI(TAG, "Effect mode set to %d", s_effect_mode);
+                if (s_effect_mode == LIGHT_EFFECT_NONE) {
+                    apply_static_color();
+                }
             }
         }
     }
@@ -568,6 +675,15 @@ static void esp_zb_task(void *pvParameters)
             ESP_LOGW(TAG, "add color attr 0x%04x failed: %s", loop_attrs[i].id, esp_err_to_name(add_err));
         }
     }
+
+    /* Manufacturer-specific cluster exposing the animated-effect selector to ZHA. */
+    uint8_t effect_default = LIGHT_EFFECT_NONE;
+    esp_zb_attribute_list_t *effect_cluster = esp_zb_zcl_attr_list_create(LIGHT_EFFECT_CLUSTER_ID);
+    esp_zb_custom_cluster_add_custom_attr(effect_cluster, LIGHT_EFFECT_ATTR_ID,
+        ESP_ZB_ZCL_ATTR_TYPE_8BIT_ENUM,
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
+        &effect_default);
+    esp_zb_cluster_list_add_custom_cluster(cluster_list, effect_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
     esp_zb_ep_list_t *esp_zb_color_light_ep = esp_zb_ep_list_create();
     esp_zb_endpoint_config_t ep_config = {
