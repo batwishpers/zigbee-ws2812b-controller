@@ -23,6 +23,7 @@ static const char *TAG = "LIGHT_NVS";
 #define NVS_KEY_CY      "cy"
 #define NVS_KEY_CMODE   "cmode"
 #define NVS_KEY_EHUE    "ehue"
+#define NVS_KEY_BACTS   "bacts"   /* per-button action selections (blob) */
 
 static TimerHandle_t   s_save_timer   = NULL;
 static light_state_t   s_pending_state;
@@ -148,4 +149,63 @@ void light_state_nvs_save_debounced(const light_state_t *state)
         /* xTimerReset restarts the countdown; if already running it resets to 0 */
         xTimerReset(s_save_timer, 0);
     }
+}
+
+esp_err_t light_state_nvs_save_button_actions(const uint8_t *actions, size_t n)
+{
+    if (actions == NULL || n == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_blob(handle, NVS_KEY_BACTS, actions, n);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Button actions saved (%u entries)", (unsigned)n);
+    } else {
+        ESP_LOGE(TAG, "Button actions save failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t light_state_nvs_load_button_actions(uint8_t *actions, size_t n)
+{
+    if (actions == NULL || n == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;  /* nothing stored yet — caller keeps its defaults */
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_open for read failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    size_t len = n;  /* in/out: capacity going in, bytes read coming out */
+    err = nvs_get_blob(handle, NVS_KEY_BACTS, actions, &len);
+    nvs_close(handle);
+
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;  /* first boot for this key — keep defaults */
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Button actions load failed: %s — using defaults", esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Button actions loaded (%u entries)", (unsigned)len);
+    return ESP_OK;
 }

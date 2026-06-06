@@ -6,3 +6,4 @@ sdkconfig.old
 doc
 docs
 .claude
+__pycache__

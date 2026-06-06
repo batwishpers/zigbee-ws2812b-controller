@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -86,6 +87,29 @@ esp_err_t light_state_nvs_load(light_state_t *state);
  * @param[in] state  Pointer to the state to persist.
  */
 void light_state_nvs_save_debounced(const light_state_t *state);
+
+/**
+ * @brief Persist the per-button on-device action selections immediately.
+ *        Stored as a single blob; called rarely (only when a button's action
+ *        is reconfigured), so no debounce is used.
+ *
+ * @param[in] actions  Array of action enum values, one per button.
+ * @param[in] n        Number of entries in @p actions.
+ * @return ESP_OK on success; NVS error code otherwise.
+ */
+esp_err_t light_state_nvs_save_button_actions(const uint8_t *actions, size_t n);
+
+/**
+ * @brief Load the per-button action selections saved by
+ *        light_state_nvs_save_button_actions(). If none are stored (first boot)
+ *        @p actions is left untouched and ESP_OK is returned, so callers should
+ *        pre-fill it with defaults.
+ *
+ * @param[in,out] actions  Array to populate (only up to the stored length).
+ * @param[in]     n        Capacity of @p actions.
+ * @return ESP_OK on success or when nothing is stored; NVS error code otherwise.
+ */
+esp_err_t light_state_nvs_load_button_actions(uint8_t *actions, size_t n);
 
 #ifdef __cplusplus
 }

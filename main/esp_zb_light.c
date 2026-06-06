@@ -21,6 +21,7 @@
 #include "ha/esp_zigbee_ha_standard.h"
 #include "esp_zb_light.h"
 #include "light_state_nvs.h"
+#include "button_driver.h"
 #include "esp_zigbee_attribute.h"
 #include "esp_random.h"
 
@@ -57,9 +58,27 @@ enum {
 };
 static uint8_t s_effect_mode = LIGHT_EFFECT_NONE;
 
+/* Manufacturer-specific cluster on each button endpoint that selects an
+ * on-device action to run when that button is pressed — independent of any HA
+ * automation. Exposed as a ZHA select via the quirk (see zigbee_status_box.py).
+ * Buttons still report their press to HA regardless of this setting. */
+#define BUTTON_ACTION_CLUSTER_ID 0xFC01
+#define BUTTON_ACTION_ATTR_ID    0x0000
+enum {
+    BTN_ACTION_NONE           = 0,  /* report press to HA only */
+    BTN_ACTION_TOGGLE_LIGHT   = 1,  /* toggle LED-strip power */
+    BTN_ACTION_NEXT_EFFECT    = 2,  /* cycle to the next effect */
+    BTN_ACTION_EFFECT_RAINBOW = 3,
+    BTN_ACTION_EFFECT_FIRE    = 4,
+    BTN_ACTION_EFFECT_CANDLE  = 5,
+};
+/* Per-button selected action, indexed by button number; loaded from NVS. */
+static uint8_t s_button_action[BUTTON_MAX];
+
 /* Forward declarations for helpers defined later in this file */
 static void hsv_to_rgb(float h, float s, float v, uint8_t *r, uint8_t *g, uint8_t *b);
 void cie_xy_to_rgb(uint16_t x, uint16_t y, uint8_t *r, uint8_t *g, uint8_t *b);
+static void on_button_pressed(uint8_t index);
 
 /* Periodic timer that mirrors the stack-managed EnhancedCurrentHue attribute
  * onto the LED while a color loop is active. */
@@ -206,6 +225,9 @@ static esp_err_t deferred_driver_init(void)
 
     // Initialise the LED strip hardware (strip starts dark)
     light_driver_init(LIGHT_DEFAULT_OFF);
+
+    // Configure the push-button GPIOs and start polling for presses
+    button_driver_init(on_button_pressed);
 
     // Restore colour — dispatch to existing converters based on ZCL colour_mode
     uint8_t r, g, b;
@@ -434,20 +456,86 @@ static void deactivate_effect(void)
         LIGHT_EFFECT_ATTR_ID, &none, false);
 }
 
-// Helper function to log current state for debugging
-static void log_current_state(void)
+/* Select an animated effect from firmware (e.g. a button action), mirroring it
+ * into the 0xFC00 attribute so ZHA's "Effect mode" select tracks the change.
+ * Setting LIGHT_EFFECT_NONE restores the last static color. */
+static void apply_effect_mode(uint8_t mode)
 {
-    uint8_t red, green, blue;
-    light_driver_get_color(&red, &green, &blue);
-    bool power = light_driver_get_power();
-    uint8_t brightness = light_driver_get_brightness();
-    
-    ESP_LOGI(TAG, "Current State - Power: %s, Brightness: %d, RGB: (%d,%d,%d)", 
-             power ? "On" : "Off", brightness, red, green, blue);
+    s_effect_mode = mode;
+    esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+        LIGHT_EFFECT_CLUSTER_ID, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        LIGHT_EFFECT_ATTR_ID, &mode, false);
+    if (mode == LIGHT_EFFECT_NONE) {
+        apply_static_color();
+    }
+    ESP_LOGI(TAG, "Effect mode set to %d (button action)", mode);
 }
 
+/* Does the actual press handling. Scheduled via esp_zb_scheduler_alarm() so it
+ * runs in the Zigbee stack's own task context — NOT the button polling task.
+ * This matters: the command-send path runs deep into the stack and overflows a
+ * small app-task stack. Running here (a Zigbee callback context) is the
+ * supported place for stack APIs, so no esp_zb_lock_acquire() is needed. */
+static void button_action_handler(uint8_t index)
+{
+    uint8_t ep = BUTTON_EP_BASE + index;
 
+    /* Send an On/Off Toggle command to the coordinator. ZHA turns the received
+     * command into a zha_event (cluster 0x0006, command "toggle", endpoint =
+     * this button's ep), which you trigger automations on. Stateless: nothing
+     * is held, so the button never "stays on" in HA. */
+    esp_zb_zcl_on_off_cmd_t cmd = {
+        .zcl_basic_cmd = {
+            .dst_addr_u.addr_short = 0x0000,        /* coordinator */
+            .dst_endpoint = HA_ESP_LIGHT_ENDPOINT,  /* coordinator endpoint 1 */
+            .src_endpoint = ep,
+        },
+        .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+        .on_off_cmd_id = ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID,
+    };
+    esp_zb_zcl_on_off_cmd_req(&cmd);
+    ESP_LOGI(TAG, "Button %u press -> Toggle command sent (src ep %u)", index, ep);
 
+    /* Run the configured on-device action. */
+    uint8_t action = (index < BUTTON_MAX) ? s_button_action[index] : BTN_ACTION_NONE;
+    switch (action) {
+    case BTN_ACTION_TOGGLE_LIGHT: {
+        bool pwr = !light_driver_get_power();
+        light_driver_set_power(pwr);
+        /* Keep the light endpoint's On/Off attribute in sync for HA. */
+        esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+            ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+            ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, &pwr, false);
+        break;
+    }
+    case BTN_ACTION_NEXT_EFFECT:
+        apply_effect_mode((uint8_t)((s_effect_mode + 1) % 4));
+        break;
+    case BTN_ACTION_EFFECT_RAINBOW:
+        apply_effect_mode(LIGHT_EFFECT_RAINBOW);
+        break;
+    case BTN_ACTION_EFFECT_FIRE:
+        apply_effect_mode(LIGHT_EFFECT_FIRE);
+        break;
+    case BTN_ACTION_EFFECT_CANDLE:
+        apply_effect_mode(LIGHT_EFFECT_CANDLE);
+        break;
+    case BTN_ACTION_NONE:
+    default:
+        break;
+    }
+}
+
+/* Invoked by button_driver on each confirmed press, in the button polling task.
+ * Defers the work to the Zigbee stack context (see button_action_handler). The
+ * scheduling call is shallow, so it's safe under the lock on the small task. */
+static void on_button_pressed(uint8_t index)
+{
+    if (esp_zb_lock_acquire(portMAX_DELAY)) {
+        esp_zb_scheduler_alarm(button_action_handler, index, 0);
+        esp_zb_lock_release();
+    }
+}
 
 static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t *message)
 {
@@ -546,6 +634,17 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
                 }
             }
         }
+    } else if (message->info.dst_endpoint >= BUTTON_EP_BASE &&
+               message->info.cluster == BUTTON_ACTION_CLUSTER_ID) {
+        /* HA reconfigured a button's on-device action (custom 0xFC01 select). */
+        if (message->attribute.id == BUTTON_ACTION_ATTR_ID && message->attribute.data.value) {
+            uint8_t idx = message->info.dst_endpoint - BUTTON_EP_BASE;
+            if (idx < BUTTON_MAX) {
+                s_button_action[idx] = *(uint8_t *)message->attribute.data.value;
+                ESP_LOGI(TAG, "Button %d action set to %d", idx, s_button_action[idx]);
+                light_state_nvs_save_button_actions(s_button_action, button_driver_count());
+            }
+        }
     }
     return ret;
 }
@@ -556,12 +655,13 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
     switch (callback_id) {
     case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
         ret = zb_attribute_handler((esp_zb_zcl_set_attr_value_message_t *)message);
-        // Log current state after any attribute change
-        //log_current_state();
+        
         // Persist the updated Zigbee attribute values (debounced NVS write).
         // We read directly from the attribute table — the ZBOSS stack has already
-        // updated the in-memory values before invoking this callback.
-        {
+        // updated the in-memory values before invoking this callback. Only the
+        // light endpoint's state lives here; button-action writes persist
+        // themselves (see zb_attribute_handler), so skip them.
+        if (((esp_zb_zcl_set_attr_value_message_t *)message)->info.dst_endpoint == HA_ESP_LIGHT_ENDPOINT) {
             light_state_t state = {0};
             esp_zb_zcl_attr_t *attr;
 
@@ -699,6 +799,58 @@ static void esp_zb_task(void *pvParameters)
     };
 
     esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_color_light_ep, HA_ESP_LIGHT_ENDPOINT, &info);
+
+    /* One endpoint per physical push button (endpoints BUTTON_EP_BASE..). Each
+     * carries an On/Off server cluster (toggled + reported on press so HA can
+     * trigger automations), an On/Off Switch Configuration cluster declaring a
+     * momentary switch, an Identify cluster, and a custom 0xFC01 cluster that
+     * selects the on-device action run on press. */
+    for (uint8_t i = 0; i < BUTTON_MAX; i++) {
+        s_button_action[i] = BTN_ACTION_NONE;
+    }
+    uint8_t btn_count = button_driver_count();
+    light_state_nvs_load_button_actions(s_button_action, btn_count);
+
+    for (uint8_t i = 0; i < btn_count; i++) {
+        esp_zb_cluster_list_t *btn_clusters = esp_zb_zcl_cluster_list_create();
+
+        /* On/Off as a CLIENT (output) cluster: the button *sends* commands rather
+         * than holding state. ZHA then models it as a stateless switch/remote (no
+         * controllable switch entity) and fires a zha_event on each press. */
+        esp_zb_on_off_cluster_cfg_t on_off_cfg = { .on_off = false };
+        esp_zb_cluster_list_add_on_off_cluster(btn_clusters,
+            esp_zb_on_off_cluster_create(&on_off_cfg), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+
+        esp_zb_identify_cluster_cfg_t identify_cfg = { .identify_time = 0 };
+        esp_zb_cluster_list_add_identify_cluster(btn_clusters,
+            esp_zb_identify_cluster_create(&identify_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+        esp_zb_on_off_switch_cluster_cfg_t sw_cfg = {
+            .switch_type   = ESP_ZB_ZCL_ON_OFF_SWITCH_CONFIGURATION_SWITCH_TYPE_MOMENTARY,
+            .switch_action = ESP_ZB_ZCL_ON_OFF_SWITCH_CONFIGURATION_SWITCH_ACTIONS_TYPE1,
+        };
+        esp_zb_cluster_list_add_on_off_switch_config_cluster(btn_clusters,
+            esp_zb_on_off_switch_config_cluster_create(&sw_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+        uint8_t action_default = s_button_action[i];
+        esp_zb_attribute_list_t *action_cluster = esp_zb_zcl_attr_list_create(BUTTON_ACTION_CLUSTER_ID);
+        esp_zb_custom_cluster_add_custom_attr(action_cluster, BUTTON_ACTION_ATTR_ID,
+            ESP_ZB_ZCL_ATTR_TYPE_8BIT_ENUM,
+            ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
+            &action_default);
+        esp_zb_cluster_list_add_custom_cluster(btn_clusters, action_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+        esp_zb_endpoint_config_t btn_ep_config = {
+            .endpoint = BUTTON_EP_BASE + i,
+            .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+            .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
+            .app_device_version = 0,
+        };
+        esp_zb_ep_list_add_ep(esp_zb_color_light_ep, btn_clusters, btn_ep_config);
+        ESP_LOGI(TAG, "Button endpoint %d created (action default %d)",
+                 BUTTON_EP_BASE + i, action_default);
+    }
+
     esp_zb_device_register(esp_zb_color_light_ep);
     esp_zb_core_action_handler_register(zb_action_handler);
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);

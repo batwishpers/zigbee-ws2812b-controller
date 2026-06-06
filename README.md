@@ -1,180 +1,183 @@
-| Supported Targets | ESP32-C5 | ESP32-h2 | ESP32-H2 |
-| ----------------- | -------- | -------- | -------- |
+| Supported Targets | ESP32-H2 | ESP32-C6 |
+| ----------------- | -------- | -------- |
 
-# Zigbee HA Color Light with LED Strip
+# Zigbee HA Status Box (RGB light + effects + push buttons)
 
-This project implements a full-featured Zigbee Home Automation color light using an ESP32-h2 and WS2812/SK68XX LED strip. It supports RGB color control, brightness adjustment, and provides comprehensive state reporting for integration with Zigbee2MQTT and other home automation systems.
+Firmware for an ESP32-H2/C6 that joins a Zigbee network as an **End Device** and
+presents a **color dimmable light** driving a WS2812/SK68XX LED strip, plus:
+
+- selectable **animated effects** (Rainbow / Fire / Candle) on top of static color, and
+- optional physical **momentary push buttons**, each exposed as its own Zigbee
+  endpoint, that fire press events to the coordinator and can also run an
+  on-device action (toggle the light, cycle effects, …) with no automation.
+
+Built on ESP-IDF and the ESP Zigbee SDK (ZBOSS). It works with any Zigbee
+coordinator for the light, and ships with a **Home Assistant ZHA quirk** that
+exposes the effect selector, the button presses (as device triggers), and the
+per-button action selectors.
+
+> Manufacturer / model reported by the firmware: **`batwishpers` / `ws2812b-ctrl-v1`**
+> (see `ESP_MANUFACTURER_NAME` / `ESP_MODEL_IDENTIFIER` in `main/esp_zb_light.h`).
 
 ## Features
 
-- **RGB Color Control**: Full color spectrum support with accurate CIE X/Y color space conversion
-- **Brightness Control**: 0-255 brightness levels with smooth scaling
-- **Power Control**: On/off functionality
-- **Zigbee HA Compliance**: Implements standard Zigbee Home Automation color light clusters
-- **State Reporting**: Real-time state logging and attribute reporting
-- **LED Strip Support**: Compatible with WS2812/SK68XX type LED strips
-- **Zigbee2MQTT Compatible**: Works with popular home automation platforms
+- **RGB color control** — Hue/Saturation, Enhanced Hue, and CIE X/Y, converted to RGB on-device.
+- **Brightness control** — 0–255 with smooth scaling.
+- **Power on/off** with state restored from NVS on boot.
+- **Animated effects** — None / Rainbow / Fire / Candle, selectable over Zigbee.
+- **State persistence** — last color/brightness/power saved to NVS (debounced), restored on reboot.
+- **Push buttons** — momentary switches reported to the coordinator + optional on-device actions, persisted to NVS.
 
-## Supported Clusters
+## Zigbee endpoints & clusters
 
-- **On/Off Cluster**: Basic power control
-- **Level Control Cluster**: Brightness control (0-255)
-- **Color Control Cluster**: RGB color control with CIE X/Y coordinates
-  - Color Mode (X/Y mode)
-  - Current X/Y coordinates
-  - Enhanced Current Hue
-  - Current Saturation
+| Endpoint | Role | Clusters |
+| --- | --- | --- |
+| `1` | Color dimmable light | On/Off, Level Control, Color Control (Hue/Sat, Enhanced Hue, X/Y, Color Loop), Basic/Identify, **custom `0xFC00`** effect selector |
+| `2 … 1+N` | Momentary button (one per button) | On/Off **client** (sends Toggle on press), On/Off Switch Configuration (`SwitchType = Momentary`), Identify, **custom `0xFC01`** action selector |
 
-The ESP Zigbee SDK provides more examples and tools for productization:
-* [ESP Zigbee SDK Docs](https://docs.espressif.com/projects/esp-zigbee-sdk)
-* [ESP Zigbee SDK Repo](https://github.com/espressif/esp-zigbee-sdk)
+**Custom clusters** (manufacturer-specific, plain attributes — no manufacturer code):
 
-## Hardware Required
+- `0xFC00` attr `0x0000` (enum8) — effect: `0=None, 1=Rainbow, 2=Fire, 3=Candle`.
+- `0xFC01` attr `0x0000` (enum8) — per-button on-device action:
+  `0=None, 1=ToggleLight, 2=NextEffect, 3=Rainbow, 4=Fire, 5=Candle`.
 
-* **ESP32-h2 Development Board**: Acting as Zigbee end-device
-* **WS2812/SK68XX LED Strip**: For RGB color output (connected to GPIO 8)
-* **USB Cable**: For power supply and programming
-* **Zigbee Coordinator**: Any Zigbee coordinator (Zigbee2MQTT, Home Assistant, etc.)
+## Hardware
 
-## Hardware Connections
+- **ESP32-H2 dev board** (acts as Zigbee end device). ESP32-C6 also supported (see `dependencies.lock`).
+- **WS2812 / SK68XX LED strip** on **GPIO 8**.
+- **Push buttons** (optional), wired active-low: `GPIO → button → GND` (internal pull-up is enabled in firmware).
+- **USB cable** for power/flashing, and any **Zigbee coordinator** (Home Assistant ZHA, Zigbee2MQTT, …).
 
-| ESP32-h2 Pin | LED Strip Connection | Code constant |
-|--------------|---------------------| --- |
-| GPIO 8       | Data Input (DIN)    | CONFIG_EXAMPLE_STRIP_LED_GPIO |
-| 3.3V         | VCC (if 3.3V compatible) |
-| GND          | GND                 |
+### Connections
 
-**Note**: If using 5V LED strips, you may need a level shifter or power the LED strip separately.
+| ESP32 pin | Connects to | Code reference |
+| --- | --- | --- |
+| GPIO 8 | LED strip data in (DIN) | `CONFIG_EXAMPLE_STRIP_LED_GPIO` (`light_driver.h`) |
+| 5V/3.3V | LED strip VCC | — |
+| GND | LED strip GND **and** button commons | — |
+| GPIO 0, 1, 4 | Button 1, 2, 3 (other side → GND) | `s_button_gpios[]` (`button_driver.c`) |
 
-## Configure the project
+> The default button pins (`GPIO_NUM_0/1/4`) are a safe-default guess — confirm
+> they are free on your board. **Avoid GPIO 8 (LED) and the boot-strap pin
+> (GPIO 9 on most ESP32-H2 devkits).** A solid common ground between the buttons,
+> the LED strip, and the ESP is important for clean WS2812 signaling.
+> 5V LED strips may need a level shifter or separate supply for the data line.
 
-Before project configuration and build, make sure to set the correct chip target using:
+**Adding more buttons:** append the GPIO to `s_button_gpios[]` in
+`main/button_driver.c` (keep the count ≤ `BUTTON_MAX`), and bump `BUTTON_COUNT`
+in `zha_quirk/zigbee_status_box.py` to match. Nothing else to change.
+
+## Build & flash (ESP-IDF v6.0)
+
+ESP-IDF lives at `~/.espressif/v6.0.1/esp-idf`. Source its activation script
+first (use **bash**, not zsh):
+
 ```bash
-idf.py set-target esp32h2
+source ~/.espressif/tools/activate_idf_v6.0.1.sh
 ```
 
-## Erase the NVRAM
+Then:
 
-Before flashing, it is recommended to erase NVRAM if you don't want to keep previous examples or other projects stored info:
 ```bash
-idf.py -p PORT erase-flash
+idf.py set-target esp32h2        # or esp32c6
+idf.py -p PORT erase-flash       # recommended before first flash (clears NVS + Zigbee storage)
+idf.py -p PORT flash monitor     # build, flash, open serial monitor (Ctrl-] to exit)
 ```
 
-## Build and Flash
+`ZB_ED_ROLE` must be defined (set in `sdkconfig` / via menuconfig) or compilation
+fails by design.
 
-Build the project, flash it to the board, and start the monitor tool to view the serial output:
+### Erasing NVS
+
+The light/effect state and per-button actions live in the `nvs` partition; the
+Zigbee network join lives in `zb_storage`.
+
 ```bash
-idf.py -p PORT flash monitor
+idf.py -p PORT erase-flash                                   # everything (also forces re-pair)
+parttool.py -p PORT erase_partition --partition-name nvs     # only saved light/button state
 ```
 
-(To exit the serial monitor, type `Ctrl-]`.)
+(Close the serial monitor first — it holds the port.)
 
-## Usage
+## Home Assistant (ZHA) setup
 
-### Zigbee2MQTT Integration
+1. Copy `zha_quirk/zigbee_status_box.py` into your HA custom-quirks directory,
+   e.g. `config/custom_zha_quirks/`.
+2. Enable quirks in `configuration.yaml`:
+   ```yaml
+   zha:
+     enable_quirks: true
+     custom_quirks_path: /config/custom_zha_quirks/
+   ```
+3. Restart HA, then remove & re-add (or reconfigure) the device so ZHA reloads the quirk.
 
-1. **Pair the device** with your Zigbee coordinator
-2. **Configure in Z2M** - the device should appear as a color light
-3. **Control via Z2M**:
-   - Toggle power on/off
-   - Adjust brightness (0-255)
-   - Set RGB colors using CIE X/Y coordinates
-   - Read current state and color values
+You then get:
 
-### Color Control
+- a light entity (color + brightness),
+- an **"Effect mode"** select (None / Rainbow / Fire / Candle),
+- a **"Button N action"** select per button, and
+- a **"Button N pressed"** device automation trigger per button.
 
-The device supports multiple color control methods:
-- **CIE X/Y Coordinates**: Standard color space for accurate color reproduction
-- **RGB Values**: Direct RGB color specification
-- **HSV Conversion**: Automatic conversion from hue/saturation values
+`BUTTON_EP_BASE` / `BUTTON_COUNT` in the quirk must match `button_driver.c`.
 
-### State Monitoring
+### Triggering automations on a button press
 
-The device provides comprehensive state logging:
-- Current power state (on/off)
-- Brightness level (0-255)
-- RGB color values
-- CIE X/Y coordinates
-- Enhanced hue and saturation values
+Either pick the device trigger **"Button N pressed"** in the automation UI, or
+listen for the raw event:
 
-## Example Output
-
-As you run the example, you will see the following log:
-
-```
-I (403) app_start: Starting scheduler on CPU0
-I (408) main_task: Started on CPU0
-I (408) main_task: Calling app_main()
-I (428) phy: phy_version: 230,2, 9aae6ea, Jan 15 2024, 11:17:12
-I (428) phy: libbtbb version: 944f18e, Jan 15 2024, 11:17:25
-I (438) main_task: Returned from app_main()
-I (548) ESP_ZB_COLOR_LIGHT: ZDO signal: ZDO Config Ready (0x17), status: ESP_FAIL
-I (548) ESP_ZB_COLOR_LIGHT: Initialize Zigbee stack
-W (548) rmt: channel resolution loss, real=10666666
-I (558) gpio: GPIO[8]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 
-I (548) ESP_ZB_COLOR_LIGHT: Deferred driver initialization successful
-I (568) ESP_ZB_COLOR_LIGHT: Device started up in factory-reset mode
-I (578) ESP_ZB_COLOR_LIGHT: Start network steering
-I (3558) ESP_ZB_COLOR_LIGHT: Joined network successfully (Extended PAN ID: 74:4d:bd:ff:fe:63:f7:30, PAN ID: 0x13af, Channel:13, Short Address: 0x7c16)
-
-// Color control example
-I (10238) ESP_ZB_COLOR_LIGHT: Received message: endpoint(10), cluster(0x6), attribute(0x0), data size(1)
-I (10238) ESP_ZB_COLOR_LIGHT: Light sets to On
-I (10238) ESP_ZB_COLOR_LIGHT: Current State - Power: On, Brightness: 255, RGB: (255,0,0)
-
-// Brightness control example
-I (10798) ESP_ZB_COLOR_LIGHT: Received message: endpoint(10), cluster(0x8), attribute(0x0), data size(1)
-I (10798) ESP_ZB_COLOR_LIGHT: Current Level set to 128
-I (10798) ESP_ZB_COLOR_LIGHT: Current State - Power: On, Brightness: 128, RGB: (255,0,0)
-
-// Color change example
-I (11228) ESP_ZB_COLOR_LIGHT: Received message: endpoint(10), cluster(0x300), attribute(0x7), data size(2)
-I (11228) ESP_ZB_COLOR_LIGHT: Color X set to 32768
-I (11228) ESP_ZB_COLOR_LIGHT: Received message: endpoint(10), cluster(0x300), attribute(0x8), data size(2)
-I (11228) ESP_ZB_COLOR_LIGHT: Color Y set to 32768
-I (11228) ESP_ZB_COLOR_LIGHT: CIE X/Y->RGB: X=32768, Y=32768 -> R=0, G=255, B=0
-I (11228) ESP_ZB_COLOR_LIGHT: Current State - Power: On, Brightness: 128, RGB: (0,255,0)
+```yaml
+trigger:
+  - platform: event
+    event_type: zha_event
+    event_data:
+      endpoint_id: 2        # 2/3/4 = button 1/2/3
+      cluster_id: 6
+      command: toggle
 ```
 
-## Control Functions
+To confirm presses reach HA, use **Developer Tools → Events → listen to
+`zha_event`** and press a button (the serial monitor also logs
+`Button N press -> Toggle command sent`).
 
-The device can be controlled through any Zigbee coordinator:
+## How it works (firmware)
 
-- **Power Control**: Turn the light on/off
-- **Brightness Control**: Adjust brightness from 0-255
-- **Color Control**: Set RGB colors using CIE X/Y coordinates
-- **State Reading**: Read current power, brightness, and color values
+1. `app_main` configures the radio/host platform and spawns `esp_zb_task`.
+2. `esp_zb_task` initializes ZBOSS, builds the light endpoint (`1`) plus one
+   On/Off-Switch endpoint per button, registers `zb_action_handler`, and commissions.
+3. `deferred_driver_init` (on first start / reboot) loads saved state from NVS,
+   restores the LED, mirrors values back into the ZCL attribute table, starts the
+   100 ms effect render timer, and starts the button driver.
+4. Coordinator writes flow through `zb_action_handler` → `zb_attribute_handler`
+   (On/Off, Level, Color Control, `0xFC00` effect, `0xFC01` button action), then
+   debounce-save to NVS.
+5. A button press: `button_driver`'s 10 ms poll task debounces, then schedules
+   `button_action_handler` onto the ZBOSS stack context (via
+   `esp_zb_scheduler_alarm`, so deep stack calls don't overflow the poll task).
+   The handler sends an On/Off `Toggle` to the coordinator and runs the button's
+   configured on-device action.
+
+See `CLAUDE.md` for deeper architecture notes (color-mode handling, effect
+rendering, and the button threading model).
 
 ## Troubleshooting
 
-### Common Issues
+**Device not seen / lost after a crash:** if the device reset, it may have left
+the network — remove and re-add it in your coordinator. `erase-flash` forces a
+clean re-pair.
 
-**Zigbee2MQTT Color Read Errors:**
-- Ensure the device is properly paired and recognized as a color light
-- Try re-pairing the device after flashing new firmware
-- Check Z2M logs for detailed error messages
+**Button presses not visible in HA:** confirm the quirk is installed and the
+device was re-added. Watch `zha_event` in Developer Tools while pressing. If
+still nothing, the On/Off output cluster may need binding to the coordinator
+(Settings → device → Clusters).
 
-**LED Strip Not Working:**
-- Verify GPIO 8 connection to LED strip data input
-- Check power supply (3.3V or 5V depending on LED strip)
-- Ensure LED strip is WS2812/SK68XX compatible
+**LED strip: only the first LED lights / wrong colors:** this is a
+wiring/signal-integrity issue, not firmware — check the data line, a solid common
+ground, and 5V power. Color order is RGB.
 
-**Color Accuracy Issues:**
-- The device uses CIE X/Y color space for accurate color reproduction
-- RGB values are automatically converted to/from CIE coordinates
-- Color order is RGB (Red, Green, Blue)
+**Build fails with a `ZB_ED_ROLE` error:** the End Device role isn't enabled in
+`sdkconfig` — it's required by design.
 
-**Brightness Control:**
-- Brightness range is 0-255 (0 = off, 255 = full brightness)
-- Brightness scaling is applied to all RGB values
-- Power off overrides brightness (LED will be off regardless of brightness setting)
+## References
 
-### Debug Information
-
-The device provides comprehensive logging:
-- All Zigbee commands received
-- Current state after each change
-- Color conversion details
-- Network status and pairing information
-
-For any technical queries, please open an [issue](https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
+- [ESP Zigbee SDK Docs](https://docs.espressif.com/projects/esp-zigbee-sdk)
+- [ESP Zigbee SDK Repo](https://github.com/espressif/esp-zigbee-sdk)
