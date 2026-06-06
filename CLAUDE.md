@@ -35,7 +35,7 @@ by design.
 - `main/esp_zb_light.c` — entry point (`app_main`), Zigbee task, signal handler,
   ZCL attribute write handler, HSV→RGB and CIE X/Y→RGB color conversion, and
   state persistence wiring.
-- `main/esp_zb_light.h` — Zigbee config macros (ED role, endpoint `10`,
+- `main/esp_zb_light.h` — Zigbee config macros (ED role, endpoint `1`,
   channel mask, manufacturer/model strings).
 - `main/light_driver.{c,h}` — LED strip abstraction over `led_strip` (RMT).
   Holds module-static RGB/power/brightness and applies brightness scaling.
@@ -45,6 +45,8 @@ by design.
   500 ms debounce timer; loads on boot (orange ~5% default on first boot).
 - `main/common/zcl_utility/` — vendored ESP helper for adding Basic-cluster
   manufacturer info to an endpoint.
+- `zha_quirk/zigbee_status_box.py` — Home Assistant ZHA custom quirk that exposes
+  the animated-effect selector (see "Light effects" below) as a select entity.
 - `managed_components/` — IDF Component Manager deps (esp-zboss-lib,
   esp-zigbee-lib, led_strip); versions pinned in `dependencies.lock`.
 - `partitions.csv` — custom partition table (factory app + Zigbee fat storage).
@@ -71,6 +73,37 @@ writes, so it cannot be trusted to pick the restore conversion. The firmware
 tracks the actually-applied mode in `s_active_color_mode` (set on every hue/sat
 or X/Y write) and persists *that* as `color_mode`. When editing color handling,
 keep this in sync — see comments in `esp_zb_light.c:31`.
+
+## Light effects (animated themes)
+
+The device supports selectable animated effects (None / Rainbow / Fire / Candle)
+on top of the standard static color control.
+
+- **Transport:** a manufacturer-specific custom cluster `0xFC00` with a single
+  `enum8` attribute `0x0000` (`0=None, 1=Rainbow, 2=Fire, 3=Candle`,
+  `READ_WRITE | REPORTING`), created in `esp_zb_task` via
+  `esp_zb_zcl_attr_list_create` + `esp_zb_custom_cluster_add_custom_attr` +
+  `esp_zb_cluster_list_add_custom_cluster`. The attribute is **not**
+  manufacturer-code-tagged on either side — writing it with a manufacturer code
+  makes ZBOSS reject it as `UNSUPPORTED_ATTRIBUTE`.
+- **Rendering:** a single 100 ms FreeRTOS auto-reload timer (`color_loop_render_cb`,
+  started in `deferred_driver_init`) dispatches on `s_effect_mode`. `render_rainbow`
+  firmware-drives an Enhanced-Hue sweep (the ZBOSS stack sets `ColorLoopActive` on a
+  ZCL `ColorLoopSet` but does *not* advance the hue itself); `render_flicker` powers
+  both Fire (hue ~5–35°) and Candle (hue ~28–42°) using `esp_random()`-eased
+  brightness/hue. A ZCL-driven `ColorLoopActive` is treated as Rainbow for backward
+  compat. Fire/Candle deliberately leave `s_active_color_mode` untouched so the saved
+  static color survives.
+- **Static color wins:** any manual color write (Hue/Sat, X/Y, Enhanced Hue) calls
+  `deactivate_effect()`, which clears `s_effect_mode` and writes `None` back to the
+  `0xFC00` attribute so ZHA's select returns to NoEffect (no blink/restart).
+- **Restore:** when an effect ends, `apply_static_color()` re-applies the last
+  user color from the live ZCL attributes.
+- **Not persisted:** `s_effect_mode` resets to None on reboot (no NVS field).
+- **ZHA setup:** install `zha_quirk/zigbee_status_box.py` into HA's custom-quirks
+  path (header in the file documents the steps). The quirk targets endpoint
+  `1` (= `HA_ESP_LIGHT_ENDPOINT`) and matches manufacturer `ESPRESSIF` / model
+  `esp32h2` — adjust `MODEL` for a C6 build.
 
 ## Conventions
 

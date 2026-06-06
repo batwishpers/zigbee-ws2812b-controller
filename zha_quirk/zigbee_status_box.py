@@ -31,9 +31,7 @@ MODEL = "esp32h2"
 EFFECT_CLUSTER_ID = 0xFC00
 EFFECT_ATTR_ID = 0x0000
 
-# The firmware exposes a single endpoint (HA_ESP_LIGHT_ENDPOINT = 10), not the
-# default 1, so every quirk operation must target it explicitly.
-ENDPOINT_ID = 10
+ENDPOINT_ID = 1
 
 
 class EffectMode(t.enum8):

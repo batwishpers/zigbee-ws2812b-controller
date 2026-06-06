@@ -45,7 +45,8 @@
 static led_strip_handle_t s_led_strip;
 static uint8_t s_red = 255, s_green = 255, s_blue = 255;
 static bool s_power = false;
-static uint8_t s_brightness = 255; // 0-255, where 255 is full brightness
+static uint8_t s_ext_brightness = 255; // 0-255, where 255 is full brightness
+static uint8_t s_brightness = 128; // 0-128, full led power is too much, limit to half power
 
 /* Serializes RMT/led_strip access: the color-loop render timer (timer daemon
  * task) and the Zigbee task can both drive the strip concurrently. */
@@ -104,14 +105,15 @@ void light_driver_get_color(uint8_t *red, uint8_t *green, uint8_t *blue)
 
 void light_driver_set_brightness(uint8_t brightness)
 {
-    s_brightness = brightness;
+    s_ext_brightness = brightness;
+    s_brightness = brightness / 2 ;
     ESP_LOGI("LIGHT_DRIVER", "Setting brightness: %d", brightness);
     apply_to_strip();
 }
 
 uint8_t light_driver_get_brightness(void)
 {
-    return s_brightness;
+    return s_ext_brightness;
 }
 
 bool light_driver_get_power(void)
