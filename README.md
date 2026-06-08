@@ -38,9 +38,9 @@ The ESP Zigbee SDK provides more examples and tools for productization:
 
 ## Hardware Connections
 
-| ESP32-h2 Pin | LED Strip Connection |
-|--------------|---------------------|
-| GPIO 8       | Data Input (DIN)    |
+| ESP32-h2 Pin | LED Strip Connection | Code constant |
+|--------------|---------------------| --- |
+| GPIO 8       | Data Input (DIN)    | CONFIG_EXAMPLE_STRIP_LED_GPIO |
 | 3.3V         | VCC (if 3.3V compatible) |
 | GND          | GND                 |
 

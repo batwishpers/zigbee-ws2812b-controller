@@ -102,8 +102,10 @@ on top of the standard static color control.
 - **Not persisted:** `s_effect_mode` resets to None on reboot (no NVS field).
 - **ZHA setup:** install `zha_quirk/zigbee_status_box.py` into HA's custom-quirks
   path (header in the file documents the steps). The quirk targets endpoint
-  `1` (= `HA_ESP_LIGHT_ENDPOINT`) and matches manufacturer `ESPRESSIF` / model
-  `esp32h2` — adjust `MODEL` for a C6 build.
+  `1` (= `HA_ESP_LIGHT_ENDPOINT`) and matches manufacturer `batwishpers` / model
+  `ws2812b-ctrl-v1`. These must stay byte-identical to `ESP_MANUFACTURER_NAME` /
+  `ESP_MODEL_IDENTIFIER` in `esp_zb_light.h` (each string there carries a
+  length-prefix byte that must equal the character count).
 
 ## Conventions
 

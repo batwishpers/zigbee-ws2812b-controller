@@ -16,8 +16,9 @@ Installation
 3. Restart Home Assistant, then remove & re-add (or reconfigure) the device so
    ZHA reloads its quirk. A new "Effect mode" select entity should appear.
 
-The firmware reports manufacturer "ESPRESSIF" and model "<idf_target>"
-(e.g. "esp32h2"); adjust MODEL below if you build for a different target.
+The firmware reports manufacturer "batwishpers" and model "ws2812b-ctrl-v1".
+These must stay byte-identical to ESP_MANUFACTURER_NAME / ESP_MODEL_IDENTIFIER
+in main/esp_zb_light.h (sans the length-prefix byte).
 """
 
 from zigpy.quirks import CustomCluster
@@ -25,8 +26,8 @@ from zigpy.quirks.v2 import QuirkBuilder
 import zigpy.types as t
 from zigpy.zcl.foundation import BaseAttributeDefs, ZCLAttributeDef
 
-MANUFACTURER = "ESPRESSIF"
-MODEL = "esp32h2"
+MANUFACTURER = "batwishpers"
+MODEL = "ws2812b-ctrl-v1"
 
 EFFECT_CLUSTER_ID = 0xFC00
 EFFECT_ATTR_ID = 0x0000
