@@ -46,7 +46,7 @@ static uint8_t s_active_color_mode = LIGHT_NVS_DEFAULT_COLOR_MODE;
 #define COLOR_LOOP_RENDER_INTERVAL_MS  100
 
 /* Manufacturer-specific cluster + attribute that select an animated light effect.
- * ZHA drives this via a custom quirk (see zha_quirk/zigbee_status_box.py). The
+ * ZHA drives this via a custom quirk (see zha_quirk/zigbee_ws2812b_controller.py). The
  * firmware runs the chosen effect inside the existing render timer. */
 #define LIGHT_EFFECT_CLUSTER_ID  0xFC00
 #define LIGHT_EFFECT_ATTR_ID     0x0000
@@ -60,7 +60,7 @@ static uint8_t s_effect_mode = LIGHT_EFFECT_NONE;
 
 /* Manufacturer-specific cluster on each button endpoint that selects an
  * on-device action to run when that button is pressed — independent of any HA
- * automation. Exposed as a ZHA select via the quirk (see zigbee_status_box.py).
+ * automation. Exposed as a ZHA select via the quirk (see zigbee_ws2812b_controller.py).
  * Buttons still report their press to HA regardless of this setting. */
 #define BUTTON_ACTION_CLUSTER_ID 0xFC01
 #define BUTTON_ACTION_ATTR_ID    0x0000

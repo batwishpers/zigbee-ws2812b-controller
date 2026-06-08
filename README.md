@@ -1,7 +1,7 @@
 | Supported Targets | ESP32-H2 | ESP32-C6 |
 | ----------------- | -------- | -------- |
 
-# Zigbee HA Status Box (RGB light + effects + push buttons)
+# zigbee-ws2812b-controller (RGB light + effects + push buttons)
 
 Firmware for an ESP32-H2/C6 that joins a Zigbee network as an **End Device** and
 presents a **color dimmable light** driving a WS2812/SK68XX LED strip, plus:
@@ -65,7 +65,7 @@ per-button action selectors.
 
 **Adding more buttons:** append the GPIO to `s_button_gpios[]` in
 `main/button_driver.c` (keep the count ≤ `BUTTON_MAX`), and bump `BUTTON_COUNT`
-in `zha_quirk/zigbee_status_box.py` to match. Nothing else to change.
+in `zha_quirk/zigbee_ws2812b_controller.py` to match. Nothing else to change.
 
 ## Build & flash (ESP-IDF v6.0)
 
@@ -101,7 +101,7 @@ parttool.py -p PORT erase_partition --partition-name nvs     # only saved light/
 
 ## Home Assistant (ZHA) setup
 
-1. Copy `zha_quirk/zigbee_status_box.py` into your HA custom-quirks directory,
+1. Copy `zha_quirk/zigbee_ws2812b_controller.py` into your HA custom-quirks directory,
    e.g. `config/custom_zha_quirks/`.
 2. Enable quirks in `configuration.yaml`:
    ```yaml

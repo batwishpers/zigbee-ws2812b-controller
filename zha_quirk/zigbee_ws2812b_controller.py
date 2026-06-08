@@ -1,4 +1,4 @@
-"""ZHA custom quirk for the Zigbee HA status box.
+"""ZHA custom quirk for the zigbee-ws2812b-controller.
 
 Exposes the device's custom manufacturer-specific entities to Home Assistant:
 
@@ -22,7 +22,7 @@ endpoint_id = 1 + button number).
 Installation
 ------------
 1. Copy this file into your Home Assistant config under a quirks directory, e.g.
-       config/custom_zha_quirks/zigbee_status_box.py
+       config/custom_zha_quirks/zigbee_ws2812b_controller.py
 2. In Settings -> Devices & Services -> ZHA -> Configure, set
    "Custom quirks path" to that directory (or add to configuration.yaml:
        zha:

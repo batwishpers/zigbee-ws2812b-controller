@@ -2,7 +2,7 @@
 
 ## Overview
 
-Zigbee Home Automation RGB status box firmware for Espressif ESP32 (H2/C6) SoCs,
+Zigbee WS2812B controller firmware for Espressif ESP32 (H2/C6) SoCs,
 built on ESP-IDF and the ESP Zigbee SDK (ZBOSS). The device joins a Zigbee
 network as an **End Device** and presents itself as a color dimmable light,
 driving a WS2812/SK68XX LED strip. Controllable from any Zigbee coordinator
@@ -52,7 +52,7 @@ by design.
   press. Knows nothing about Zigbee. See "Push buttons".
 - `main/common/zcl_utility/` — vendored ESP helper for adding Basic-cluster
   manufacturer info to an endpoint.
-- `zha_quirk/zigbee_status_box.py` — Home Assistant ZHA custom quirk that exposes
+- `zha_quirk/zigbee_ws2812b_controller.py` — Home Assistant ZHA custom quirk that exposes
   the animated-effect selector (see "Light effects") as a select entity, and the
   push-button endpoints as device automation triggers + per-button "action"
   selects (see "Push buttons").
@@ -114,7 +114,7 @@ on top of the standard static color control.
 - **Restore:** when an effect ends, `apply_static_color()` re-applies the last
   user color from the live ZCL attributes.
 - **Not persisted:** `s_effect_mode` resets to None on reboot (no NVS field).
-- **ZHA setup:** install `zha_quirk/zigbee_status_box.py` into HA's custom-quirks
+- **ZHA setup:** install `zha_quirk/zigbee_ws2812b_controller.py` into HA's custom-quirks
   path (header in the file documents the steps). The quirk targets endpoint
   `1` (= `HA_ESP_LIGHT_ENDPOINT`) and matches manufacturer `batwishpers` / model
   `ws2812b-ctrl-v1`. These must stay byte-identical to `ESP_MANUFACTURER_NAME` /
