@@ -190,6 +190,7 @@ ground, and 5V power. Color order is RGB.
 
 ## References
 
+- [tototo31/zigbee-HA-status-box](https://github.com/tototo31/zigbee-HA-status-box) Base project, started as a fork then an independent project since it now overachieve the original project
 - [ESP Zigbee SDK Docs](https://docs.espressif.com/projects/esp-zigbee-sdk)
 - [ESP Zigbee SDK Repo](https://github.com/espressif/esp-zigbee-sdk)
 - [WLED](https://github.com/wled/WLED) Reference for effects, big thanks for the library
