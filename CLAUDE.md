@@ -90,24 +90,40 @@ keep this in sync — see comments in `esp_zb_light.c:31`.
 
 ## Light effects (animated themes)
 
-The device supports selectable animated effects (None / Rainbow / Fire / Candle)
-on top of the standard static color control.
+The device supports selectable animated effects (None / Rainbow / Fire / Candle /
+Plasma) on top of the standard static color control. Effects are **spatial /
+per-pixel** — they vary along the strip position rather than pulsing the whole
+strip in unison. All effect maths derive from `CONFIG_EXAMPLE_STRIP_LED_NUMBER`,
+so they work for any build-time strip length (no hardcoded count).
 
 - **Transport:** a manufacturer-specific custom cluster `0xFC00` with a single
-  `enum8` attribute `0x0000` (`0=None, 1=Rainbow, 2=Fire, 3=Candle`,
+  `enum8` attribute `0x0000` (`0=None, 1=Rainbow, 2=Fire, 3=Candle, 4=Plasma`,
   `READ_WRITE | REPORTING`), created in `esp_zb_task` via
   `esp_zb_zcl_attr_list_create` + `esp_zb_custom_cluster_add_custom_attr` +
   `esp_zb_cluster_list_add_custom_cluster`. The attribute is **not**
   manufacturer-code-tagged on either side — writing it with a manufacturer code
   makes ZBOSS reject it as `UNSUPPORTED_ATTRIBUTE`.
-- **Rendering:** a single 100 ms FreeRTOS auto-reload timer (`color_loop_render_cb`,
-  started in `deferred_driver_init`) dispatches on `s_effect_mode`. `render_rainbow`
-  firmware-drives an Enhanced-Hue sweep (the ZBOSS stack sets `ColorLoopActive` on a
-  ZCL `ColorLoopSet` but does *not* advance the hue itself); `render_flicker` powers
-  both Fire (hue ~5–35°) and Candle (hue ~28–42°) using `esp_random()`-eased
-  brightness/hue. A ZCL-driven `ColorLoopActive` is treated as Rainbow for backward
-  compat. Fire/Candle deliberately leave `s_active_color_mode` untouched so the saved
-  static color survives.
+- **Per-pixel output:** the renderers fill a module-static `s_frame[]` buffer and
+  push it via `light_driver_set_pixels(rgb, count)` — a `light_driver` API that
+  scales each pixel by power/brightness (like the static path) and is guarded by
+  the same `s_strip_mutex`, but does **not** mutate the stored static color, so
+  the restore-on-end path keeps working.
+- **Rendering:** a single 50 ms FreeRTOS auto-reload timer (`color_loop_render_cb`,
+  started in `deferred_driver_init`) dispatches on `s_effect_mode`, skipping render
+  while the light is powered off. `render_rainbow` draws a hue gradient (~1.5
+  rainbows) that flows along the strip via a firmware-driven Enhanced-Hue
+  accumulator (the ZBOSS stack sets `ColorLoopActive` on a ZCL `ColorLoopSet` but
+  does *not* advance the hue itself). `render_fire` is a per-pixel Fire2012
+  simulation (heat array cooled, diffused upward, sparked at the base via
+  `esp_random()`, mapped through `heat_to_rgb`). `render_candle` gives each LED its
+  own warm hue/brightness easing toward random targets, so pixels shimmer out of
+  phase. `render_plasma` maps a drifting 1D value-noise field (`value_noise1d`) to
+  a hue sweep. A ZCL-driven `ColorLoopActive` is treated as Rainbow for backward
+  compat. **All** effects (including Rainbow) deliberately leave
+  `s_active_color_mode` untouched so the user's last static color survives the
+  effect. Rainbow used to set it to `ENHANCED_HUE`, but since the hue is animated
+  locally and never written back to `EnhancedCurrentHue`, the restore would always
+  read 0 and come back as red — so it leaves the mode alone like the others.
 - **Static color wins:** any manual color write (Hue/Sat, X/Y, Enhanced Hue) calls
   `deactivate_effect()`, which clears `s_effect_mode` and writes `None` back to the
   `0xFC00` attribute so ZHA's select returns to NoEffect (no blink/restart).
@@ -151,7 +167,7 @@ press event to the coordinator and can additionally run an on-device action.
 - **On-device actions (`0xFC01`):** a manufacturer-specific cluster (enum8 attr
   `0x0000`, `READ_WRITE | REPORTING`) per button selecting a local action, run in
   `button_action_handler` after the press is sent:
-  `0=None, 1=ToggleLight, 2=NextEffect, 3=Rainbow, 4=Fire, 5=Candle`. Built like
+  `0=None, 1=ToggleLight, 2=NextEffect, 3=Rainbow, 4=Fire, 5=Candle, 6=Plasma`. Built like
   the `0xFC00` effect cluster and exposed by the quirk as a "Button N action"
   select. **Persisted** to NVS (unlike `s_effect_mode`), so a button keeps its
   action across reboots; loaded in `esp_zb_task` before the endpoints are created

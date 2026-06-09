@@ -72,6 +72,29 @@ static void apply_to_strip(void)
     }
 }
 
+void light_driver_set_pixels(const uint8_t *rgb, uint16_t count)
+{
+    if (rgb == NULL) {
+        return;
+    }
+    if (count > CONFIG_EXAMPLE_STRIP_LED_NUMBER) {
+        count = CONFIG_EXAMPLE_STRIP_LED_NUMBER;
+    }
+    if (s_strip_mutex) {
+        xSemaphoreTake(s_strip_mutex, portMAX_DELAY);
+    }
+    for (uint16_t i = 0; i < count; i++) {
+        uint8_t r = (rgb[i * 3 + 0] * s_power * s_brightness) / 255;
+        uint8_t g = (rgb[i * 3 + 1] * s_power * s_brightness) / 255;
+        uint8_t b = (rgb[i * 3 + 2] * s_power * s_brightness) / 255;
+        ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, r, g, b));
+    }
+    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
+    if (s_strip_mutex) {
+        xSemaphoreGive(s_strip_mutex);
+    }
+}
+
 void light_driver_set_power(bool power)
 {
     s_power = power;
@@ -119,188 +142,6 @@ uint8_t light_driver_get_brightness(void)
 bool light_driver_get_power(void)
 {
     return s_power;
-}
-
-void light_driver_set_test_color(uint8_t color_index)
-{
-    uint8_t red, green, blue;
-    
-    switch (color_index) {
-        case 0: // Red
-            red = 255; green = 0; blue = 0;
-            break;
-        case 1: // Green
-            red = 0; green = 255; blue = 0;
-            break;
-        case 2: // Blue
-            red = 0; green = 0; blue = 255;
-            break;
-        case 3: // White
-            red = 255; green = 255; blue = 255;
-            break;
-        case 4: // Yellow
-            red = 255; green = 255; blue = 0;
-            break;
-        case 5: // Cyan
-            red = 0; green = 255; blue = 255;
-            break;
-        case 6: // Magenta
-            red = 255; green = 0; blue = 255;
-            break;
-        default:
-            red = 128; green = 128; blue = 128; // Gray
-            break;
-    }
-    
-    ESP_LOGI("LIGHT_DRIVER", "Setting test color %d: R=%d, G=%d, B=%d", color_index, red, green, blue);
-    light_driver_set_color(red, green, blue);
-}
-
-void light_driver_test_color_order(void)
-{
-    ESP_LOGI("LIGHT_DRIVER", "Testing color order - should see: Red, Green, Blue, White");
-    
-    // Test pure colors to verify color order
-    ESP_LOGI("LIGHT_DRIVER", "Testing RED (should be red)");
-    light_driver_set_color(255, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    ESP_LOGI("LIGHT_DRIVER", "Testing GREEN (should be green)");
-    light_driver_set_color(0, 255, 0);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    ESP_LOGI("LIGHT_DRIVER", "Testing BLUE (should be blue)");
-    light_driver_set_color(0, 0, 255);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    ESP_LOGI("LIGHT_DRIVER", "Testing WHITE (should be white)");
-    light_driver_set_color(255, 255, 255);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    ESP_LOGI("LIGHT_DRIVER", "Color order test complete");
-}
-
-void light_driver_test_all_color_orders(void)
-{
-    ESP_LOGI("LIGHT_DRIVER", "Testing ALL possible color orders to find correct mapping");
-    ESP_LOGI("LIGHT_DRIVER", "Watch the LED and note which test shows the correct colors");
-    
-    // Test 1: RGB order
-    ESP_LOGI("LIGHT_DRIVER", "TEST 1: RGB order - Red should be red");
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, 255, 0, 0)); // R, G, B
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test 2: GRB order (current)
-    ESP_LOGI("LIGHT_DRIVER", "TEST 2: GRB order - Red should be red");
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, 0, 255, 0)); // G, R, B
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test 3: BGR order
-    ESP_LOGI("LIGHT_DRIVER", "TEST 3: BGR order - Red should be red");
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, 0, 0, 255)); // B, G, R
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test 4: BRG order
-    ESP_LOGI("LIGHT_DRIVER", "TEST 4: BRG order - Red should be red");
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, 0, 255, 0)); // B, R, G
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test 5: RBG order
-    ESP_LOGI("LIGHT_DRIVER", "TEST 5: RBG order - Red should be red");
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, 255, 0, 0)); // R, B, G
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test 6: GBR order
-    ESP_LOGI("LIGHT_DRIVER", "TEST 6: GBR order - Red should be red");
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, 0, 0, 255)); // G, B, R
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    ESP_LOGI("LIGHT_DRIVER", "Color order test complete - which test showed RED correctly?");
-}
-
-void light_driver_test_targeted_orders(void)
-{
-    ESP_LOGI("LIGHT_DRIVER", "Testing targeted color orders based on observations");
-    ESP_LOGI("LIGHT_DRIVER", "Current: Red->Orange, Green->Yellow, Blue->DarkOrange");
-    ESP_LOGI("LIGHT_DRIVER", "Testing likely candidates...");
-    
-    // Test 1: RBG order (Red, Blue, Green)
-    ESP_LOGI("LIGHT_DRIVER", "TEST 1: RBG order - Red should be red");
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, 255, 0, 0)); // R, B, G
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test 2: GBR order (Green, Blue, Red)
-    ESP_LOGI("LIGHT_DRIVER", "TEST 2: GBR order - Red should be red");
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, 0, 0, 255)); // G, B, R
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test 3: BRG order (Blue, Red, Green)
-    ESP_LOGI("LIGHT_DRIVER", "TEST 3: BRG order - Red should be red");
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, 0, 255, 0)); // B, R, G
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test 4: RGB order (Red, Green, Blue) - standard
-    ESP_LOGI("LIGHT_DRIVER", "TEST 4: RGB order - Red should be red");
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, 255, 0, 0)); // R, G, B
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    ESP_LOGI("LIGHT_DRIVER", "Targeted test complete - which test showed PURE RED?");
-}
-
-void light_driver_test_cie_xy_conversion(void)
-{
-    ESP_LOGI("LIGHT_DRIVER", "Testing CIE X/Y color space conversion");
-    ESP_LOGI("LIGHT_DRIVER", "Testing known CIE coordinates for Red, Green, Blue");
-    
-    uint8_t r, g, b;
-    
-    // Test Red: CIE X=0.64, Y=0.33 (approximate red coordinates)
-    ESP_LOGI("LIGHT_DRIVER", "Testing RED: CIE X=0.64, Y=0.33");
-    uint16_t red_x = (uint16_t)(0.64f * 65535);
-    uint16_t red_y = (uint16_t)(0.33f * 65535);
-    cie_xy_to_rgb(red_x, red_y, &r, &g, &b);
-    ESP_LOGI("LIGHT_DRIVER", "Red CIE->RGB: R=%d, G=%d, B=%d", r, g, b);
-    light_driver_set_color(r, g, b);
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test Green: CIE X=0.30, Y=0.60 (approximate green coordinates)
-    ESP_LOGI("LIGHT_DRIVER", "Testing GREEN: CIE X=0.30, Y=0.60");
-    uint16_t green_x = (uint16_t)(0.30f * 65535);
-    uint16_t green_y = (uint16_t)(0.60f * 65535);
-    cie_xy_to_rgb(green_x, green_y, &r, &g, &b);
-    ESP_LOGI("LIGHT_DRIVER", "Green CIE->RGB: R=%d, G=%d, B=%d", r, g, b);
-    light_driver_set_color(r, g, b);
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test Blue: CIE X=0.15, Y=0.06 (approximate blue coordinates)
-    ESP_LOGI("LIGHT_DRIVER", "Testing BLUE: CIE X=0.15, Y=0.06");
-    uint16_t blue_x = (uint16_t)(0.15f * 65535);
-    uint16_t blue_y = (uint16_t)(0.06f * 65535);
-    cie_xy_to_rgb(blue_x, blue_y, &r, &g, &b);
-    ESP_LOGI("LIGHT_DRIVER", "Blue CIE->RGB: R=%d, G=%d, B=%d", r, g, b);
-    light_driver_set_color(r, g, b);
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test White: CIE X=0.33, Y=0.33 (D65 white point)
-    ESP_LOGI("LIGHT_DRIVER", "Testing WHITE: CIE X=0.33, Y=0.33");
-    uint16_t white_x = (uint16_t)(0.33f * 65535);
-    uint16_t white_y = (uint16_t)(0.33f * 65535);
-    cie_xy_to_rgb(white_x, white_y, &r, &g, &b);
-    ESP_LOGI("LIGHT_DRIVER", "White CIE->RGB: R=%d, G=%d, B=%d", r, g, b);
-    light_driver_set_color(r, g, b);
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    ESP_LOGI("LIGHT_DRIVER", "CIE X/Y conversion test complete");
 }
 
 void light_driver_init(bool power)

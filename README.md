@@ -44,7 +44,7 @@ per-button action selectors.
 ## Hardware
 
 - **ESP32-H2 dev board** (acts as Zigbee end device). ESP32-C6 also supported (see `dependencies.lock`).
-- **WS2812 / SK68XX LED strip** on **GPIO 8**.
+- **WS2812 / SK68XX LED strip** on **GPIO 10**.
 - **Push buttons** (optional), wired active-low: `GPIO → button → GND` (internal pull-up is enabled in firmware).
 - **USB cable** for power/flashing, and any **Zigbee coordinator** (Home Assistant ZHA, Zigbee2MQTT, …).
 
@@ -52,13 +52,13 @@ per-button action selectors.
 
 | ESP32 pin | Connects to | Code reference |
 | --- | --- | --- |
-| GPIO 8 | LED strip data in (DIN) | `CONFIG_EXAMPLE_STRIP_LED_GPIO` (`light_driver.h`) |
+| GPIO 10 | LED strip data in (DIN) | `CONFIG_EXAMPLE_STRIP_LED_GPIO` (`light_driver.h`) |
 | 5V/3.3V | LED strip VCC | — |
 | GND | LED strip GND **and** button commons | — |
-| GPIO 0, 1, 4 | Button 1, 2, 3 (other side → GND) | `s_button_gpios[]` (`button_driver.c`) |
+| GPIO 0, 1, 2 | Button 1, 2, 3 (other side → GND) | `s_button_gpios[]` (`button_driver.c`) |
 
-> The default button pins (`GPIO_NUM_0/1/4`) are a safe-default guess — confirm
-> they are free on your board. **Avoid GPIO 8 (LED) and the boot-strap pin
+> The default button pins (`GPIO_NUM_0/1/2`) are a safe-default guess — confirm
+> they are free on your board. **Avoid GPIO 10 (LED) and the boot-strap pin
 > (GPIO 9 on most ESP32-H2 devkits).** A solid common ground between the buttons,
 > the LED strip, and the ESP is important for clean WS2812 signaling.
 > 5V LED strips may need a level shifter or separate supply for the data line.
@@ -181,3 +181,5 @@ ground, and 5V power. Color order is RGB.
 
 - [ESP Zigbee SDK Docs](https://docs.espressif.com/projects/esp-zigbee-sdk)
 - [ESP Zigbee SDK Repo](https://github.com/espressif/esp-zigbee-sdk)
+- [WLED](https://github.com/wled/WLED) Reference for effects, big thanks for the library
+- [Wiring Diagram](https://esp32io.com/tutorials/esp32-ws2812b-led-strip)

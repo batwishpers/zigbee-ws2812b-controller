@@ -38,6 +38,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,6 +69,19 @@ void light_driver_set_power(bool power);
 void light_driver_set_color(uint8_t red, uint8_t green, uint8_t blue);
 
 /**
+* @brief Push a full frame of per-pixel colors to the strip.
+*
+* Each channel is power/brightness-scaled exactly like the static color path,
+* and access is serialized with the same mutex. Unlike light_driver_set_color(),
+* this does NOT mutate the stored static color, so an effect can render freely
+* and the last user color is restored when the effect ends.
+*
+* @param rgb   Pointer to count*3 bytes, laid out R,G,B per pixel.
+* @param count Number of pixels (clamped to CONFIG_EXAMPLE_STRIP_LED_NUMBER).
+*/
+void light_driver_set_pixels(const uint8_t *rgb, uint16_t count);
+
+/**
 * @brief Set light color and power.
 *
 * @param  power  The light power to be set
@@ -85,33 +99,6 @@ void light_driver_set_color_power(bool power, uint8_t red, uint8_t green, uint8_
 * @param  blue   Pointer to store blue component
 */
 void light_driver_get_color(uint8_t *red, uint8_t *green, uint8_t *blue);
-
-/**
-* @brief Set a predefined test color for debugging
-*
-* @param color_index 0=Red, 1=Green, 2=Blue, 3=White, 4=Yellow, 5=Cyan, 6=Magenta
-*/
-void light_driver_set_test_color(uint8_t color_index);
-
-/**
-* @brief Test different color orders to verify LED strip configuration
-*/
-void light_driver_test_color_order(void);
-
-/**
-* @brief Test all possible color order combinations to find the correct one
-*/
-void light_driver_test_all_color_orders(void);
-
-/**
-* @brief Test specific color orders based on current observations
-*/
-void light_driver_test_targeted_orders(void);
-
-/**
-* @brief Test CIE X/Y color space conversion with known coordinates
-*/
-void light_driver_test_cie_xy_conversion(void);
 
 /**
 * @brief Convert CIE X/Y coordinates to RGB values

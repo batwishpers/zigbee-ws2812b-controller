@@ -69,6 +69,7 @@ class EffectMode(t.enum8):
     Rainbow = 1
     Fire = 2
     Candle = 3
+    Plasma = 4
 
 
 class ButtonAction(t.enum8):
@@ -80,6 +81,7 @@ class ButtonAction(t.enum8):
     Rainbow = 3
     Fire = 4
     Candle = 5
+    Plasma = 6
 
 
 class LightEffectCluster(CustomCluster):

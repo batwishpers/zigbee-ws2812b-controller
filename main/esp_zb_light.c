@@ -18,6 +18,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "math.h"
+#include "string.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "esp_zb_light.h"
 #include "light_state_nvs.h"
@@ -43,7 +44,7 @@ static uint8_t s_active_color_mode = LIGHT_NVS_DEFAULT_COLOR_MODE;
 #define LIGHT_COLOR_MODE_ENHANCED_HUE  0x02U
 
 /* How often the color loop re-renders the LED from EnhancedCurrentHue. */
-#define COLOR_LOOP_RENDER_INTERVAL_MS  100
+#define COLOR_LOOP_RENDER_INTERVAL_MS  50
 
 /* Manufacturer-specific cluster + attribute that select an animated light effect.
  * ZHA drives this via a custom quirk (see zha_quirk/zigbee_ws2812b_controller.py). The
@@ -55,7 +56,9 @@ enum {
     LIGHT_EFFECT_RAINBOW = 1,
     LIGHT_EFFECT_FIRE    = 2,
     LIGHT_EFFECT_CANDLE  = 3,
+    LIGHT_EFFECT_PLASMA  = 4,
 };
+#define LIGHT_EFFECT_COUNT 5  /* number of selectable modes incl. None */
 static uint8_t s_effect_mode = LIGHT_EFFECT_NONE;
 
 /* Manufacturer-specific cluster on each button endpoint that selects an
@@ -71,9 +74,19 @@ enum {
     BTN_ACTION_EFFECT_RAINBOW = 3,
     BTN_ACTION_EFFECT_FIRE    = 4,
     BTN_ACTION_EFFECT_CANDLE  = 5,
+    BTN_ACTION_EFFECT_PLASMA  = 6,
 };
 /* Per-button selected action, indexed by button number; loaded from NVS. */
 static uint8_t s_button_action[BUTTON_MAX];
+
+/* Number of LEDs on the strip. Effects derive all spatial maths from this so
+ * they work for any build-time strip length (no hardcoded count). */
+#define LED_COUNT CONFIG_EXAMPLE_STRIP_LED_NUMBER
+
+/* Scratch frame filled by the spatial effect renderers, then pushed in one go
+ * via light_driver_set_pixels(). R,G,B per pixel. Touched only by the render
+ * timer task, so it needs no locking of its own. */
+static uint8_t s_frame[LED_COUNT * 3];
 
 /* Forward declarations for helpers defined later in this file */
 static void hsv_to_rgb(float h, float s, float v, uint8_t *r, uint8_t *g, uint8_t *b);
@@ -119,13 +132,58 @@ static void apply_static_color(void)
     light_driver_set_color(r, g, b);
 }
 
-/* Rainbow sweep — drives EnhancedCurrentHue ourselves. The stack sets
- * ColorLoopActive on a ZCL ColorLoopSet but does NOT advance the hue (it just
- * re-writes the start hue, which stays 0 = red), so we step a local accumulator
- * and render it. `fresh` re-seeds from the configured start hue on (re)activation. */
+/* ---- Small math helpers shared by the spatial effect renderers ---- */
+
+/* Saturating 8-bit subtract / add (clamp at 0 / 255). */
+static inline uint8_t qsub8(uint8_t a, uint8_t b) { return (a > b) ? (uint8_t)(a - b) : 0; }
+static inline uint8_t qadd8(uint8_t a, uint8_t b) { unsigned s = (unsigned)a + b; return (s > 255) ? 255 : (uint8_t)s; }
+
+/* 0..255 random byte from the hardware RNG. */
+static inline uint8_t rnd8(void) { return (uint8_t)(esp_random() & 0xFF); }
+
+/* Map a heat value (0 = cold .. 255 = hottest) onto a fire ramp:
+ * black -> red -> orange/yellow -> white. Same idea as FastLED's HeatColor(). */
+static void heat_to_rgb(uint8_t heat, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+    uint8_t t192 = (uint8_t)(((unsigned)heat * 191) / 255); /* scale 0..255 -> 0..191 */
+    uint8_t ramp = (uint8_t)((t192 & 0x3F) << 2);           /* position within band, 0..252 */
+    if (t192 & 0x80) {        /* hottest third: red+green saturated, ramp blue in */
+        *r = 255; *g = 255; *b = ramp;
+    } else if (t192 & 0x40) { /* middle third: red saturated, ramp green in */
+        *r = 255; *g = ramp; *b = 0;
+    } else {                  /* coolest third: ramp red in from black */
+        *r = ramp; *g = 0; *b = 0;
+    }
+}
+
+/* Smooth 1D value noise in [0,1): hash integer lattice points to pseudo-random
+ * values and cosine-interpolate between them. Cheap, dependency-free, organic. */
+static float hash01(int32_t n)
+{
+    uint32_t x = (uint32_t)n * 1664525u + 1013904223u;
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15;
+    return (x & 0xFFFFFF) / (float)0x1000000;
+}
+static float value_noise1d(float x)
+{
+    int32_t xi = (int32_t)floorf(x);
+    float xf = x - (float)xi;
+    float a = hash01(xi);
+    float b = hash01(xi + 1);
+    float t = (1.0f - cosf(xf * 3.14159265f)) * 0.5f; /* smooth blend */
+    return a + (b - a) * t;
+}
+
+/* Rainbow sweep — a hue gradient that spans the strip and flows over time. The
+ * stack sets ColorLoopActive on a ZCL ColorLoopSet but does NOT advance the hue
+ * (it just re-writes the start hue, which stays 0 = red), so we step a local
+ * accumulator and render it. `fresh` re-seeds from the configured start hue.
+ * Like the other effects, it deliberately leaves s_active_color_mode untouched:
+ * the hue is animated locally and never written back to EnhancedCurrentHue, so
+ * keying the restore off it would always come back as red. */
 static void render_rainbow(bool fresh)
 {
-    static uint16_t hue = 0;
+    static uint16_t base = 0;
 
     uint8_t  dir   = color_attr_u8(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_DIRECTION_ID, 1);
     uint16_t ltime = color_attr_u16(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_TIME_ID, 0x0019);
@@ -136,11 +194,11 @@ static void render_rainbow(bool fresh)
     /* A color loop is a vivid rainbow sweep, so render at full saturation. We do
      * NOT read CurrentSaturation here: it can legitimately be 0 (white), which
      * would wash the loop out entirely. */
-    const uint8_t sat = 0xFE;
+    const float sat = 0xFE / 255.0f;
 
     if (fresh) {
-        hue = color_attr_u16(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_START_ENHANCED_HUE_ID, 0);
-        ESP_LOGI(TAG, "Rainbow start — dir=%u time=%us start_hue=%u", dir, ltime, hue);
+        base = color_attr_u16(ESP_ZB_ZCL_ATTR_COLOR_CONTROL_COLOR_LOOP_START_ENHANCED_HUE_ID, 0);
+        ESP_LOGI(TAG, "Rainbow start — dir=%u time=%us start_hue=%u", dir, ltime, base);
     }
 
     /* Advance one render tick of a full 0..65535 sweep performed over `ltime`
@@ -149,32 +207,111 @@ static void render_rainbow(bool fresh)
     if (step == 0) {
         step = 1;
     }
-    hue = (dir == 0x00) ? (uint16_t)(hue - step) : (uint16_t)(hue + step);
+    base = (dir == 0x00) ? (uint16_t)(base - step) : (uint16_t)(base + step);
 
-    uint8_t r, g, b;
-    hsv_to_rgb((hue / 65535.0f) * 360.0f, sat / 255.0f, 1.0f, &r, &g, &b);
-    light_driver_set_color(r, g, b);
-    s_active_color_mode = LIGHT_COLOR_MODE_ENHANCED_HUE;
+    /* Spread ~1.5 full rainbows across the strip, independent of its length. */
+    const float spread = (1.5f * 65536.0f) / LED_COUNT;
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        uint16_t hue = (uint16_t)(base + (uint16_t)(i * spread));
+        uint8_t r, g, b;
+        hsv_to_rgb((hue / 65535.0f) * 360.0f, sat, 1.0f, &r, &g, &b);
+        s_frame[i * 3 + 0] = r;
+        s_frame[i * 3 + 1] = g;
+        s_frame[i * 3 + 2] = b;
+    }
+    light_driver_set_pixels(s_frame, LED_COUNT);
 }
 
-/* Organic warm-flicker render shared by fire and candle. Each tick eases the
- * brightness and hue toward fresh random targets so the result shimmers instead
- * of strobing. Deliberately does NOT touch s_active_color_mode, so the static
- * color saved for restore is preserved. */
-static void render_flicker(float hue_lo, float hue_hi, float val_lo, float val_hi, float smoothing)
+/* Fire — a per-pixel "Fire2012" simulation. A heat array is cooled, diffused
+ * upward and randomly sparked at the base (index 0), then mapped to fire colors.
+ * All tuning scales with LED_COUNT so the flame looks right at any strip length.
+ * `fresh` clears the heat so the flame restarts from cold. Deliberately does NOT
+ * touch s_active_color_mode, so the saved static color survives. */
+static void render_fire(bool fresh)
 {
-    static float level = 0.7f;
-    static float hue   = 25.0f;
+    static uint8_t heat[LED_COUNT];
+    if (fresh) {
+        memset(heat, 0, sizeof(heat));
+    }
 
-    float val_target = val_lo + (val_hi - val_lo) * (esp_random() / (float)UINT32_MAX);
-    float hue_target = hue_lo + (hue_hi - hue_lo) * (esp_random() / (float)UINT32_MAX);
+    /* 1. Cool every cell down a little (normalized to strip length). */
+    uint8_t cooling = (uint8_t)((55 * 10) / LED_COUNT + 2);
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        heat[i] = qsub8(heat[i], (uint8_t)(rnd8() % (cooling + 1)));
+    }
 
-    level += (val_target - level) * smoothing;
-    hue   += (hue_target - hue)   * smoothing;
+    /* 2. Heat drifts up the strip and blurs into its lower neighbours. */
+    for (int k = LED_COUNT - 1; k >= 2; k--) {
+        heat[k] = (uint8_t)(((unsigned)heat[k - 1] + heat[k - 2] + heat[k - 2]) / 3);
+    }
 
-    uint8_t r, g, b;
-    hsv_to_rgb(hue, 1.0f, level, &r, &g, &b);
-    light_driver_set_color(r, g, b);
+    /* 3. Randomly ignite a fresh spark near the base. */
+    if (rnd8() < 120) {
+        uint16_t span = (LED_COUNT < 7) ? LED_COUNT : 7;
+        uint8_t y = (uint8_t)(rnd8() % span);
+        heat[y] = qadd8(heat[y], (uint8_t)(160 + rnd8() % 96));
+    }
+
+    /* 4. Map each cell's heat to a fire color. */
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        uint8_t r, g, b;
+        heat_to_rgb(heat[i], &r, &g, &b);
+        s_frame[i * 3 + 0] = r;
+        s_frame[i * 3 + 1] = g;
+        s_frame[i * 3 + 2] = b;
+    }
+    light_driver_set_pixels(s_frame, LED_COUNT);
+}
+
+/* Candle — each LED keeps its own warm hue/brightness and eases toward fresh
+ * random targets, so neighbouring pixels shimmer out of phase (organic flicker
+ * rather than the whole strip pulsing in unison). `fresh` re-seeds the per-pixel
+ * state. Like Fire, leaves s_active_color_mode untouched. */
+static void render_candle(bool fresh)
+{
+    static float level[LED_COUNT];
+    static float lhue[LED_COUNT];
+    if (fresh) {
+        for (uint16_t i = 0; i < LED_COUNT; i++) {
+            level[i] = 0.8f;
+            lhue[i]  = 35.0f;
+        }
+    }
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        float val_target = 0.55f + 0.45f * (rnd8() / 255.0f);
+        float hue_target = 28.0f + 14.0f * (rnd8() / 255.0f);
+        level[i] += (val_target - level[i]) * 0.15f;
+        lhue[i]  += (hue_target - lhue[i]) * 0.15f;
+        uint8_t r, g, b;
+        hsv_to_rgb(lhue[i], 1.0f, level[i], &r, &g, &b);
+        s_frame[i * 3 + 0] = r;
+        s_frame[i * 3 + 1] = g;
+        s_frame[i * 3 + 2] = b;
+    }
+    light_driver_set_pixels(s_frame, LED_COUNT);
+}
+
+/* Plasma — a slowly drifting value-noise field mapped to a full hue sweep, so
+ * colors flow and morph organically along the strip. The noise sampling rate is
+ * normalized to LED_COUNT (~4 features across the strip) for any length.
+ * `fresh` resets the time origin. Leaves s_active_color_mode untouched. */
+static void render_plasma(bool fresh)
+{
+    static float t = 0.0f;
+    if (fresh) {
+        t = 0.0f;
+    }
+    t += 0.05f; /* drift speed */
+
+    for (uint16_t i = 0; i < LED_COUNT; i++) {
+        float n = value_noise1d(i * (4.0f / LED_COUNT) + t);
+        uint8_t r, g, b;
+        hsv_to_rgb(n * 360.0f, 1.0f, 1.0f, &r, &g, &b);
+        s_frame[i * 3 + 0] = r;
+        s_frame[i * 3 + 1] = g;
+        s_frame[i * 3 + 2] = b;
+    }
+    light_driver_set_pixels(s_frame, LED_COUNT);
 }
 
 static void color_loop_render_cb(TimerHandle_t timer)
@@ -193,6 +330,13 @@ static void color_loop_render_cb(TimerHandle_t timer)
         return;
     }
 
+    /* Don't render (or burn cycles) while the light is off — the strip is dark
+     * anyway, and we want a clean restart when it's switched back on. */
+    if (!light_driver_get_power()) {
+        last_effect = LIGHT_EFFECT_NONE;
+        return;
+    }
+
     bool fresh = (effect != last_effect);
     last_effect = effect;
 
@@ -201,10 +345,13 @@ static void color_loop_render_cb(TimerHandle_t timer)
         render_rainbow(fresh);
         break;
     case LIGHT_EFFECT_FIRE:
-        render_flicker(5.0f, 35.0f, 0.40f, 1.0f, 0.30f);
+        render_fire(fresh);
         break;
     case LIGHT_EFFECT_CANDLE:
-        render_flicker(28.0f, 42.0f, 0.50f, 0.95f, 0.15f);
+        render_candle(fresh);
+        break;
+    case LIGHT_EFFECT_PLASMA:
+        render_plasma(fresh);
         break;
     default:
         break;
@@ -509,7 +656,7 @@ static void button_action_handler(uint8_t index)
         break;
     }
     case BTN_ACTION_NEXT_EFFECT:
-        apply_effect_mode((uint8_t)((s_effect_mode + 1) % 4));
+        apply_effect_mode((uint8_t)((s_effect_mode + 1) % LIGHT_EFFECT_COUNT));
         break;
     case BTN_ACTION_EFFECT_RAINBOW:
         apply_effect_mode(LIGHT_EFFECT_RAINBOW);
@@ -519,6 +666,9 @@ static void button_action_handler(uint8_t index)
         break;
     case BTN_ACTION_EFFECT_CANDLE:
         apply_effect_mode(LIGHT_EFFECT_CANDLE);
+        break;
+    case BTN_ACTION_EFFECT_PLASMA:
+        apply_effect_mode(LIGHT_EFFECT_PLASMA);
         break;
     case BTN_ACTION_NONE:
     default:
