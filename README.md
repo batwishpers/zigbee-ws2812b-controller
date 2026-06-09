@@ -55,13 +55,21 @@ per-button action selectors.
 | GPIO 10 | LED strip data in (DIN) | `CONFIG_EXAMPLE_STRIP_LED_GPIO` (`light_driver.h`) |
 | 5V/3.3V | LED strip VCC | — |
 | GND | LED strip GND **and** button commons | — |
+| GPIO 0 | **Reset button** (hold 5 s → factory reset; other side → GND) | `BUTTON_RESET_GPIO` (`button_driver.h`) |
 | GPIO 1, 2, 3 | Button 1, 2, 3 (other side → GND) | `s_button_gpios[]` (`button_driver.c`) |
 
-> The default button pins (`GPIO_NUM_0/1/2`) are a safe-default guess — confirm
-> they are free on your board. **Avoid GPIO 10 (LED) and the boot-strap pin
-> (GPIO 9 on most ESP32-H2 devkits).** A solid common ground between the buttons,
-> the LED strip, and the ESP is important for clean WS2812 signaling.
+> The button pins are a safe-default guess — confirm they are free on your
+> board. **Avoid GPIO 10 (LED) and the boot-strap pin (GPIO 9 on most ESP32-H2
+> devkits).** A solid common ground between the buttons, the LED strip, and the
+> ESP is important for clean WS2812 signaling.
 > 5V LED strips may need a level shifter or separate supply for the data line.
+
+**Reset button (GPIO 0):** like every Zigbee device, holding this dedicated
+button for **5 seconds** (`BUTTON_RESET_HOLD_MS` in `button_driver.h`) performs a
+full factory reset — it leaves the Zigbee network *and* erases all saved light
+settings, so you can reset without `idf.py erase-flash`. It has fixed logic and
+is not exposed to the coordinator. After release the device reboots factory-new
+(default orange ~5%) and re-commissions.
 
 **Adding more buttons:** append the GPIO to `s_button_gpios[]` in
 `main/button_driver.c` (keep the count ≤ `BUTTON_MAX`), and bump `BUTTON_COUNT`
@@ -98,6 +106,9 @@ parttool.py -p PORT erase_partition --partition-name nvs     # only saved light/
 ```
 
 (Close the serial monitor first — it holds the port.)
+
+Or, with no cable: **hold the reset button (GPIO 0) for 5 seconds** — it erases
+both partitions and reboots factory-new (see the reset-button note above).
 
 ## Home Assistant (ZHA) setup
 

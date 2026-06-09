@@ -31,7 +31,12 @@ static const gpio_num_t s_button_gpios[] = {
 #define BUTTON_POLL_INTERVAL_MS 10
 #define BUTTON_DEBOUNCE_SAMPLES 3
 
+/* Reset button: number of consecutive low (pressed) samples that make up the
+ * BUTTON_RESET_HOLD_MS hold. The same poll task counts these. */
+#define BUTTON_RESET_HOLD_SAMPLES (BUTTON_RESET_HOLD_MS / BUTTON_POLL_INTERVAL_MS)
+
 static button_press_cb_t s_press_cb = NULL;
+static button_reset_cb_t s_reset_cb = NULL;
 
 uint8_t button_driver_count(void)
 {
@@ -45,6 +50,7 @@ static void button_poll_task(void *arg)
     uint8_t stable[BUTTON_COUNT];     /* last accepted, debounced level */
     uint8_t candidate[BUTTON_COUNT];  /* level currently being debounced */
     uint8_t count[BUTTON_COUNT];      /* consecutive samples seen at candidate */
+    uint32_t reset_held = 0;          /* consecutive low samples on the reset button */
 
     for (size_t i = 0; i < BUTTON_COUNT; i++) {
         stable[i] = 1;
@@ -53,6 +59,22 @@ static void button_poll_task(void *arg)
     }
 
     for (;;) {
+        /* Dedicated reset button: no debounce, just measure a sustained hold.
+         * Counting stops at the threshold so the callback fires exactly once;
+         * releasing the button (level high) re-arms it. */
+        if (gpio_get_level(BUTTON_RESET_GPIO) == 0) {
+            if (reset_held < BUTTON_RESET_HOLD_SAMPLES) {
+                reset_held++;
+                if (reset_held == BUTTON_RESET_HOLD_SAMPLES && s_reset_cb) {
+                    ESP_LOGW(TAG, "Reset button held %d ms — triggering factory reset",
+                             BUTTON_RESET_HOLD_MS);
+                    s_reset_cb();
+                }
+            }
+        } else {
+            reset_held = 0;
+        }
+
         for (size_t i = 0; i < BUTTON_COUNT; i++) {
             uint8_t level = (uint8_t)gpio_get_level(s_button_gpios[i]);
 
@@ -78,11 +100,14 @@ static void button_poll_task(void *arg)
     }
 }
 
-void button_driver_init(button_press_cb_t cb)
+void button_driver_init(button_press_cb_t press_cb, button_reset_cb_t reset_cb)
 {
-    s_press_cb = cb;
+    s_press_cb = press_cb;
+    s_reset_cb = reset_cb;
 
-    uint64_t pin_mask = 0;
+    /* Configure the momentary buttons plus the dedicated reset button together —
+     * they share the same input + internal pull-up configuration. */
+    uint64_t pin_mask = (1ULL << BUTTON_RESET_GPIO);
     for (size_t i = 0; i < BUTTON_COUNT; i++) {
         pin_mask |= (1ULL << s_button_gpios[i]);
     }
@@ -100,6 +125,7 @@ void button_driver_init(button_press_cb_t cb)
      * lock and calls esp_zb_zcl_set_attribute_val, which recurses into the
      * reporting machinery — a smaller stack overflows and resets the chip. */
     xTaskCreate(button_poll_task, "btn_poll", 4096, NULL, 5, NULL);
-    ESP_LOGI(TAG, "Button driver started (%u buttons, %d ms poll)",
-             (unsigned)BUTTON_COUNT, BUTTON_POLL_INTERVAL_MS);
+    ESP_LOGI(TAG, "Button driver started (%u buttons, %d ms poll, reset on GPIO %d held %d ms)",
+             (unsigned)BUTTON_COUNT, BUTTON_POLL_INTERVAL_MS,
+             BUTTON_RESET_GPIO, BUTTON_RESET_HOLD_MS);
 }

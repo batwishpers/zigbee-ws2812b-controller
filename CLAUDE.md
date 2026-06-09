@@ -46,10 +46,14 @@ by design.
 - `main/light_state_nvs.{c,h}` — persists last known light state to NVS with a
   500 ms debounce timer; loads on boot (orange ~5% default on first boot). Also
   stores the per-button on-device action selections (blob, written immediately).
+  `light_state_nvs_erase()` wipes the namespace for the factory-reset path.
 - `main/button_driver.{c,h}` — GPIO push-button abstraction. Configures the pins
   in `s_button_gpios[]` (active-low, internal pull-up), runs one 10 ms polling
   task that debounces every button, and invokes a registered callback on each
-  press. Knows nothing about Zigbee. See "Push buttons".
+  press. The same task also watches a dedicated **reset button**
+  (`BUTTON_RESET_GPIO`, GPIO 0): held low for `BUTTON_RESET_HOLD_MS` (5 s) it
+  fires a separate reset callback once. Knows nothing about Zigbee. See "Push
+  buttons" and "Reset button".
 - `main/common/zcl_utility/` — vendored ESP helper for adding Basic-cluster
   manufacturer info to an endpoint.
 - `zha_quirk/zigbee_ws2812b_controller.py` — Home Assistant ZHA custom quirk that exposes
@@ -175,6 +179,27 @@ press event to the coordinator and can additionally run an on-device action.
 - **ZHA setup:** the same quirk file declares `BUTTON_EP_BASE` / `BUTTON_COUNT` —
   keep them in sync with `button_driver.c`. Trigger automations via the device's
   "Button N pressed" automation trigger, or a raw `zha_event` trigger.
+
+## Reset button (factory reset)
+
+A dedicated **fixed-logic** button on `BUTTON_RESET_GPIO` (GPIO 0) — the pin
+freed up for this in `button_driver.c`. Like every Zigbee device, it lets you
+reset without `idf.py erase-flash`.
+
+- **Wiring:** active-low, `GPIO 0 → button → GND`, internal pull-up (same as the
+  momentary buttons).
+- **Behaviour:** the button poll task counts consecutive low samples; held for
+  `BUTTON_RESET_HOLD_MS` (`button_driver.h`, **5 s**) it fires the reset callback
+  exactly once (counting caps at the threshold; releasing re-arms it). Not a
+  Zigbee endpoint, not in `s_button_gpios[]`, not exposed to the coordinator.
+- **Threading:** same constraint as the press path — the poll task only
+  `esp_zb_scheduler_alarm()`s `reset_request_handler` (under the Zigbee lock); the
+  deep stack-reset path then runs in the ZBOSS context.
+- **What it erases:** `reset_request_handler` calls `light_state_nvs_erase()`
+  (wipes the `light_state` NVS namespace — colour/brightness/effect/button
+  actions) **and then** `esp_zb_factory_reset()` (erases the `zb_storage`
+  partition and reboots — does not return). The device comes back factory-new
+  (default orange ~5%) and re-commissions onto a network.
 
 ## Conventions
 

@@ -209,3 +209,29 @@ esp_err_t light_state_nvs_load_button_actions(uint8_t *actions, size_t n)
     ESP_LOGI(TAG, "Button actions loaded (%u entries)", (unsigned)len);
     return ESP_OK;
 }
+
+esp_err_t light_state_nvs_erase(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;  /* nothing stored — already at defaults */
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_erase_all(handle);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Light state NVS erased");
+    } else {
+        ESP_LOGE(TAG, "Light state NVS erase failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}

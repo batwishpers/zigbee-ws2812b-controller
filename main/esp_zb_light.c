@@ -92,6 +92,7 @@ static uint8_t s_frame[LED_COUNT * 3];
 static void hsv_to_rgb(float h, float s, float v, uint8_t *r, uint8_t *g, uint8_t *b);
 void cie_xy_to_rgb(uint16_t x, uint16_t y, uint8_t *r, uint8_t *g, uint8_t *b);
 static void on_button_pressed(uint8_t index);
+static void on_reset_requested(void);
 
 /* Periodic timer that mirrors the stack-managed EnhancedCurrentHue attribute
  * onto the LED while a color loop is active. */
@@ -374,7 +375,7 @@ static esp_err_t deferred_driver_init(void)
     light_driver_init(LIGHT_DEFAULT_OFF);
 
     // Configure the push-button GPIOs and start polling for presses
-    button_driver_init(on_button_pressed);
+    button_driver_init(on_button_pressed, on_reset_requested);
 
     // Restore colour — dispatch to existing converters based on ZCL colour_mode
     uint8_t r, g, b;
@@ -683,6 +684,29 @@ static void on_button_pressed(uint8_t index)
 {
     if (esp_zb_lock_acquire(portMAX_DELAY)) {
         esp_zb_scheduler_alarm(button_action_handler, index, 0);
+        esp_zb_lock_release();
+    }
+}
+
+/* Performs the factory reset, scheduled into the Zigbee stack context (like
+ * button_action_handler) so the deep stack-reset path doesn't run on the small
+ * button poll task. Wipes our light-state NVS too, then esp_zb_factory_reset()
+ * erases the Zigbee storage and reboots — the device comes back factory-new
+ * (default orange ~5%) and re-commissions onto the network. */
+static void reset_request_handler(uint8_t param)
+{
+    (void)param;
+    ESP_LOGW(TAG, "Factory reset — erasing all settings and leaving the network");
+    light_state_nvs_erase();
+    esp_zb_factory_reset();  /* erases zb_storage and reboots; does not return */
+}
+
+/* Invoked by button_driver when the reset button has been held long enough, in
+ * the button polling task. Defers to the Zigbee stack context (see above). */
+static void on_reset_requested(void)
+{
+    if (esp_zb_lock_acquire(portMAX_DELAY)) {
+        esp_zb_scheduler_alarm(reset_request_handler, 0, 0);
         esp_zb_lock_release();
     }
 }

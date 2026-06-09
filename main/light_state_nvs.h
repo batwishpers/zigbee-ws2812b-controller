@@ -111,6 +111,15 @@ esp_err_t light_state_nvs_save_button_actions(const uint8_t *actions, size_t n);
  */
 esp_err_t light_state_nvs_load_button_actions(uint8_t *actions, size_t n);
 
+/**
+ * @brief Erase all persisted light state and button actions from NVS.
+ *        Used by the factory-reset path so the device boots with defaults
+ *        (esp_zb_factory_reset() only clears the separate Zigbee storage).
+ *
+ * @return ESP_OK on success (or when nothing was stored); NVS error code otherwise.
+ */
+esp_err_t light_state_nvs_erase(void);
+
 #ifdef __cplusplus
 }
 #endif
