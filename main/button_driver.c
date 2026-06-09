@@ -20,9 +20,9 @@ static const char *TAG = "BUTTON";
  *  These defaults are a safe guess — verify they are free on your board.
  * ------------------------------------------------------------------------- */
 static const gpio_num_t s_button_gpios[] = {
-    GPIO_NUM_0,
     GPIO_NUM_1,
     GPIO_NUM_2,
+    GPIO_NUM_3,
 };
 #define BUTTON_COUNT (sizeof(s_button_gpios) / sizeof(s_button_gpios[0]))
 

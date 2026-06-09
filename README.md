@@ -55,7 +55,7 @@ per-button action selectors.
 | GPIO 10 | LED strip data in (DIN) | `CONFIG_EXAMPLE_STRIP_LED_GPIO` (`light_driver.h`) |
 | 5V/3.3V | LED strip VCC | — |
 | GND | LED strip GND **and** button commons | — |
-| GPIO 0, 1, 2 | Button 1, 2, 3 (other side → GND) | `s_button_gpios[]` (`button_driver.c`) |
+| GPIO 1, 2, 3 | Button 1, 2, 3 (other side → GND) | `s_button_gpios[]` (`button_driver.c`) |
 
 > The default button pins (`GPIO_NUM_0/1/2`) are a safe-default guess — confirm
 > they are free on your board. **Avoid GPIO 10 (LED) and the boot-strap pin
