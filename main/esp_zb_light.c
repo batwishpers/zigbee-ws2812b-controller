@@ -649,6 +649,21 @@ static void button_action_handler(uint8_t index)
     switch (action) {
     case BTN_ACTION_TOGGLE_LIGHT: {
         bool pwr = !light_driver_get_power();
+        if (pwr) {
+            /* Re-sync the driver brightness from the live CurrentLevel attribute
+             * before powering on. When HA turns the light off it drives
+             * CurrentLevel to 0 (On/Off <-> Level coupling), which zeroes the
+             * driver's brightness via the write handler; the stack then silently
+             * restores the CurrentLevel *attribute* without firing that handler,
+             * so the driver brightness stays at 0 while the attribute holds the
+             * real level. Without this re-sync the strip would light up black. */
+            esp_zb_zcl_attr_t *lvl = esp_zb_zcl_get_attribute(HA_ESP_LIGHT_ENDPOINT,
+                ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID);
+            if (lvl && lvl->data_p) {
+                light_driver_set_brightness(*(uint8_t *)lvl->data_p);
+            }
+        }
         light_driver_set_power(pwr);
         /* Keep the light endpoint's On/Off attribute in sync for HA. */
         esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
